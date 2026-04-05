@@ -584,15 +584,15 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                     publishMqttTopic("status/soc", String.valueOf(_soc));
                     _lastPublishedSoc = _soc;
                 }
-                if (_lastPublishedSocMin != _socMin) {
+                if (_lastPublishedSocMin != _socMin && _socMin != 0) {
                     publishMqttTopic("status/soc_min", String.valueOf(_socMin));
                     _lastPublishedSocMin = _socMin;
                 }
-                if (_lastPublishedSocMax != _socMax) {
+                if (_lastPublishedSocMax != _socMax && _socMax != 0) {
                     publishMqttTopic("status/soc_max", String.valueOf(_socMax));
                     _lastPublishedSocMax = _socMax;
                 }
-                if (_lastPublishedSocDelta != _socDelta) {
+                if (_lastPublishedSocDelta != _socDelta && _socDelta != 0) {
                     publishMqttTopic("status/soc_delta", String.valueOf(_socDelta));
                     _lastPublishedSocDelta = _socDelta;
                 }
