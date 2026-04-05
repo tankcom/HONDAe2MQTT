@@ -60,6 +60,8 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     public static final int CAN_BUS_SCAN_INTERVALL = 30000;
     public static final int WAIT_FOR_NEW_MESSAGE_TIMEOUT = 1000;
     public static final int WAIT_TIME_BETWEEN_COMMAND_SENDS_MS = 50;
+    public static final int PARK_STAGE_1_SECONDS = 3 * 60;
+    public static final int PARK_STAGE_2_SECONDS = 30 * 60;
 
     // CAN Command IDs
     public static final String VIN_ID = "1862F190";
@@ -68,6 +70,43 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     public static final String SOC_ID = "F6622029";
     public static final String BATTEMP_ID = "F662202A";
     public static final String ODO_ID = "39627022";
+    private long getCurrentPollingIntervalMs() {
+        long now = System.currentTimeMillis() / 1000;
+        long referenceEpoch = _lastCanMessageEpoch > 0 ? _lastCanMessageEpoch : _btConnectedSinceEpoch;
+        long secondsSinceReference = referenceEpoch > 0 ? Math.max(0, now - referenceEpoch) : 0;
+
+        int pollSeconds;
+        if (secondsSinceReference <= PARK_STAGE_1_SECONDS) {
+            pollSeconds = _pollFastSeconds;
+        } else if (secondsSinceReference <= PARK_STAGE_2_SECONDS) {
+            pollSeconds = _pollMidSeconds;
+        } else {
+            pollSeconds = _pollSlowSeconds;
+        }
+
+        return Math.max(1, pollSeconds) * 1000L;
+    }
+
+    private void publishControlStatusAsync() {
+        if (!_mqttRunning) {
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                if (_mqttClient == null || !_mqttClient.isConnected()) {
+                    connectToMqtt();
+                }
+                publishMqttTopic("status/bt_connected", String.valueOf(_bluetoothConnected));
+                publishMqttTopic("status/auto_reconnect_enabled", String.valueOf(_viewModel.isAutoReconnectEnabled()));
+                publishMqttTopic("status/poll_fast_s", String.valueOf(_pollFastSeconds));
+                publishMqttTopic("status/poll_mid_s", String.valueOf(_pollMidSeconds));
+                publishMqttTopic("status/poll_slow_s", String.valueOf(_pollSlowSeconds));
+            } catch (Exception ignored) {
+            }
+        }).start();
+    }
+
 
     public static final int RANGE_ESTIMATE_WINDOW_5KM = 5;
 
@@ -79,6 +118,9 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private static final String MQTT_BASE_TOPIC = "hondae";
     private static final String MQTT_TOPIC_COMMAND_CONNECT = MQTT_BASE_TOPIC + "/cmd/connect";
     private static final String MQTT_TOPIC_COMMAND_AUTO_RECONNECT = MQTT_BASE_TOPIC + "/cmd/auto_reconnect";
+    private static final String MQTT_TOPIC_COMMAND_POLL_FAST_SECONDS = MQTT_BASE_TOPIC + "/cmd/poll_fast_s";
+    private static final String MQTT_TOPIC_COMMAND_POLL_MID_SECONDS = MQTT_BASE_TOPIC + "/cmd/poll_mid_s";
+    private static final String MQTT_TOPIC_COMMAND_POLL_SLOW_SECONDS = MQTT_BASE_TOPIC + "/cmd/poll_slow_s";
 
     private static final String NOTIFICATION_CHANNEL_ID = "SoC";
     private static final int NOTIFICATION_ID = 23;
@@ -159,8 +201,13 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private volatile boolean _loopRunning = false;
     private volatile boolean _mqttRunning = false;
     private boolean _carConnected = false;
+    private boolean _bluetoothConnected = false;
     private byte _newMessage;
     private long _lastCanMessageEpoch = 0;
+    private long _btConnectedSinceEpoch = 0;
+    private volatile int _pollFastSeconds = CAN_BUS_SCAN_INTERVALL / 1000;
+    private volatile int _pollMidSeconds = (CAN_BUS_SCAN_INTERVALL / 1000) * 7;
+    private volatile int _pollSlowSeconds = (CAN_BUS_SCAN_INTERVALL / 1000) * 30;
 
     private final Handler _mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable _reconnectRunnable = () -> {
@@ -356,7 +403,10 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 _connectionText.setText(R.string.status_connected);
                 _connectSwitch.setChecked(true);
                 _connectSwitch.setEnabled(true);
+                _bluetoothConnected = true;
+                _btConnectedSinceEpoch = System.currentTimeMillis() / 1000;
                 _mainHandler.removeCallbacks(_reconnectRunnable);
+                publishControlStatusAsync();
                 
                 // 2. Prevent double threads AND initialize the flag correctly
                 if (!_loopRunning) {
@@ -377,8 +427,10 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 _connectionText.setText(R.string.status_disconnected);
                 _connectSwitch.setChecked(false);
                 _connectSwitch.setEnabled(true);
+                _bluetoothConnected = false;
                 closeLogFile();
                 _mainHandler.removeCallbacks(_reconnectRunnable);
+                publishControlStatusAsync();
                 break;
 
             case RETRY:
@@ -620,8 +672,11 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 publishMqttTopic("meta/timestamp", String.valueOf(_epoch));
                 
                 // Publish responsive status topics
-                publishMqttTopic("status/bt_connected", String.valueOf(_carConnected));
+                publishMqttTopic("status/bt_connected", String.valueOf(_bluetoothConnected));
                 publishMqttTopic("status/auto_reconnect_enabled", String.valueOf(_viewModel.isAutoReconnectEnabled()));
+                publishMqttTopic("status/poll_fast_s", String.valueOf(_pollFastSeconds));
+                publishMqttTopic("status/poll_mid_s", String.valueOf(_pollMidSeconds));
+                publishMqttTopic("status/poll_slow_s", String.valueOf(_pollSlowSeconds));
 
                 _lastEpochSuccessfulApiSend = _epoch;
                 setText(_apiStatusText, "🔵"); 
@@ -751,15 +806,16 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 }
                 _newMessage = 0;
 
-                Thread.sleep(CAN_BUS_SCAN_INTERVALL);
+                Thread.sleep(getCurrentPollingIntervalMs());
 
             } catch (InterruptedException e) {
                 _loopRunning = false;
             } catch (Exception e) {
                 String errorMsg = e.getMessage() != null ? e.getMessage() : "Unknown Error";
-                setText(_messageText, "Error: " + errorMsg + ". Retrying in " + (CAN_BUS_SCAN_INTERVALL/1000) + "s...");
+                long retrySeconds = getCurrentPollingIntervalMs() / 1000;
+                setText(_messageText, "Error: " + errorMsg + ". Retrying in " + retrySeconds + "s...");
                 try {
-                    Thread.sleep(CAN_BUS_SCAN_INTERVALL);
+                    Thread.sleep(getCurrentPollingIntervalMs());
                 } catch (InterruptedException ie) {
                     _loopRunning = false;
                 }
@@ -909,6 +965,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         } else {
             connectToMqtt();
         }
+        publishControlStatusAsync();
     }
 
     private void handleAutoReconnectSwitch(boolean isChecked) {
@@ -917,6 +974,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         SharedPreferences.Editor edit = _preferences.edit();
         edit.putBoolean(PREFS_KEY_BT_AUTO_RECONNECT, isChecked);
         edit.apply();
+        publishControlStatusAsync();
     }
 
     private void subscribeCommandTopics() {
@@ -924,6 +982,9 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             if (_mqttClient != null && _mqttClient.isConnected()) {
                 _mqttClient.subscribe(MQTT_TOPIC_COMMAND_CONNECT, 1);
                 _mqttClient.subscribe(MQTT_TOPIC_COMMAND_AUTO_RECONNECT, 1);
+                _mqttClient.subscribe(MQTT_TOPIC_COMMAND_POLL_FAST_SECONDS, 1);
+                _mqttClient.subscribe(MQTT_TOPIC_COMMAND_POLL_MID_SECONDS, 1);
+                _mqttClient.subscribe(MQTT_TOPIC_COMMAND_POLL_SLOW_SECONDS, 1);
             }
         } catch (Exception e) {
             setText(_apiStatusText, "🔴");
@@ -945,8 +1006,38 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 } else if (isOffPayload(payload)) {
                     _autoReconnectSwitch.setChecked(false);
                 }
+            } else if (MQTT_TOPIC_COMMAND_POLL_FAST_SECONDS.equals(topic)) {
+                Integer parsed = parsePollingSeconds(payload);
+                if (parsed != null) {
+                    _pollFastSeconds = parsed;
+                }
+                publishControlStatusAsync();
+            } else if (MQTT_TOPIC_COMMAND_POLL_MID_SECONDS.equals(topic)) {
+                Integer parsed = parsePollingSeconds(payload);
+                if (parsed != null) {
+                    _pollMidSeconds = parsed;
+                }
+                publishControlStatusAsync();
+            } else if (MQTT_TOPIC_COMMAND_POLL_SLOW_SECONDS.equals(topic)) {
+                Integer parsed = parsePollingSeconds(payload);
+                if (parsed != null) {
+                    _pollSlowSeconds = parsed;
+                }
+                publishControlStatusAsync();
             }
         });
+    }
+
+    private Integer parsePollingSeconds(String payload) {
+        try {
+            int value = Integer.parseInt(payload);
+            if (value < 1) {
+                return null;
+            }
+            return Math.min(value, 3600);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private boolean isOnPayload(String payload) {
@@ -987,6 +1078,11 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             publishHADiscoverySensor(nodeId, "charging_mode", "Charging Mode", "", "mdi:plug");
             publishHADiscoverySensor(nodeId, "last_can_message", "Last CAN Message", "", "mdi:clock");
             publishHADiscoverySensor(nodeId, "last_can_message_ago_seconds", "Last CAN Seconds Ago", "s", "mdi:clock-outline");
+            publishHADiscoverySensor(nodeId, "bt_connected", "BT Connected", "", "mdi:bluetooth");
+            publishHADiscoverySensor(nodeId, "auto_reconnect_enabled", "Auto Reconnect Enabled", "", "mdi:wifi-sync");
+            publishHADiscoverySensor(nodeId, "poll_fast_s", "Poll Fast", "s", "mdi:timer-fast");
+            publishHADiscoverySensor(nodeId, "poll_mid_s", "Poll Mid", "s", "mdi:timer-outline");
+            publishHADiscoverySensor(nodeId, "poll_slow_s", "Poll Slow", "s", "mdi:timer-sand");
             _discoveryPublished = true;
         } catch (Exception e) {
             // Silently fail on discovery

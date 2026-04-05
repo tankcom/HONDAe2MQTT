@@ -12,6 +12,9 @@ A WIP Android App to read Real-Time-Data off of the Honda e via OBD2 ([thanks to
 - Die App kann per MQTT-Topic ferngesteuert werden:
 	- `hondae/cmd/connect` (Payload: `on`, `true`, `1`, `connect`, `enable` → Verbindung aufbauen; `off`, `false`, `0`, `disconnect`, `disable` → Verbindung trennen)
 	- `hondae/cmd/auto_reconnect` (Payload: analog wie oben; steuert den Auto-Reconnect-Toggle)
+	- `hondae/cmd/poll_fast_s` (Payload: Sekunden für Poll-Frequenz bis 3 Minuten nach letztem CAN-Datenpunkt)
+	- `hondae/cmd/poll_mid_s` (Payload: Sekunden für Poll-Frequenz zwischen 3 und 30 Minuten)
+	- `hondae/cmd/poll_slow_s` (Payload: Sekunden für Poll-Frequenz ab 30 Minuten)
 - Die App hört automatisch auf diese Topics und setzt die Verbindung/Toggles entsprechend.
 
 ### MQTT Topic-Struktur
@@ -40,6 +43,9 @@ A WIP Android App to read Real-Time-Data off of the Honda e via OBD2 ([thanks to
 	- `hondae/meta/last_can_message_ago_seconds` (Sekunden seit der letzten CAN-Nachricht)
 	- `hondae/status/bt_connected` (true/false - aktueller Verbindungsstatus mit Auto)
 	- `hondae/status/auto_reconnect_enabled` (true/false - aktueller Toggle-Status für Auto-Reconnect)
+	- `hondae/status/poll_fast_s` (aktueller Fast-Poll-Wert in Sekunden)
+	- `hondae/status/poll_mid_s` (aktueller Mid-Poll-Wert in Sekunden)
+	- `hondae/status/poll_slow_s` (aktueller Slow-Poll-Wert in Sekunden)
 
 ### Heartbeat-Mechanismus
 - Die App publiziert automatisch alle 10 Sekunden einen Heartbeat auf `hondae/heartbeat/status` mit dem Wert `online`.
