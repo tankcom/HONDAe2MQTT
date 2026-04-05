@@ -538,6 +538,10 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                     @Override
                     public void connectComplete(boolean reconnect, String serverURI) {
                         subscribeCommandTopics();
+                        // Reset discovery flag so it gets re-published on reconnect
+                        _discoveryPublished = false;
+                        // Re-publish discovery messages after connection/reconnection
+                        publishHomeAssistantDiscovery();
                     }
 
                     @Override
