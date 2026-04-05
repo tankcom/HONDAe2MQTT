@@ -86,9 +86,8 @@ A WIP Android App to read Real-Time-Data off of the Honda e via OBD2 ([thanks to
 
 ### Hinweise
 - Die MQTT-URL wird wie bisher im UI eingetragen (`tcp://user:pass@host:port`).
-- Der 12V-Wert wird sofort nach Empfang zu MQTT gesendet (auch einzeln, nicht nur im Sekundentakt).
-- Der weiße Punkt neben "Send data via mqtt" zeigt den MQTT-Status: 🔵 = verbunden/aktiv, 🔴 = nicht verbunden.
-- Die neuen Funktionen sind ab Commit April 2026 verfügbar.
+- Der 12V-Wert wird sofort nach Empfang zu MQTT gesendet.
+
 
 
 ---

@@ -1094,6 +1094,18 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             publishHADiscoverySensor(nodeId, "last_can_fields_csv", "Last CAN Fields CSV", "", "mdi:format-list-bulleted");
             publishHADiscoverySensor(nodeId, "bt_connected", "BT Connected", "", "mdi:bluetooth");
 
+            // GPS topics
+            publishHADiscoverySensor(nodeId, "gps_lat", "GPS Latitude", "", "mdi:latitude", MQTT_BASE_TOPIC + "/gps/lat");
+            publishHADiscoverySensor(nodeId, "gps_lon", "GPS Longitude", "", "mdi:longitude", MQTT_BASE_TOPIC + "/gps/lon");
+            publishHADiscoverySensor(nodeId, "gps_elevation_m", "GPS Elevation", "m", "mdi:elevation-rise", MQTT_BASE_TOPIC + "/gps/elevation_m");
+
+            // Meta topics
+            publishHADiscoverySensor(nodeId, "meta_timestamp", "Timestamp", "", "mdi:clock", MQTT_BASE_TOPIC + "/meta/timestamp");
+
+            // Heartbeat topics
+            publishHADiscoverySensor(nodeId, "heartbeat_status", "Heartbeat Status", "", "mdi:heart-pulse", MQTT_BASE_TOPIC + "/heartbeat/status");
+            publishHADiscoverySensor(nodeId, "heartbeat_timestamp", "Heartbeat Timestamp", "", "mdi:clock-check", MQTT_BASE_TOPIC + "/heartbeat/timestamp");
+
                 // Writable entities (state + command)
                 publishHADiscoverySwitch(
                     nodeId,
@@ -1188,6 +1200,35 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         payload.append("}");
         payload.append("}");
         
+        MqttMessage message = new MqttMessage(payload.toString().getBytes());
+        message.setQos(1);
+        message.setRetained(true);
+        _mqttClient.publish(topic, message);
+    }
+
+    private void publishHADiscoverySensor(String nodeId, String objectId, String name, String unit, String icon, String stateTopic) throws Exception {
+        if (_mqttClient == null || !_mqttClient.isConnected()) return;
+
+        String topic = "homeassistant/sensor/" + nodeId + "/" + objectId + "/config";
+
+        StringBuilder payload = new StringBuilder();
+        payload.append("{");
+        payload.append("\"name\":\"").append(name).append("\",");
+        payload.append("\"object_id\":\"").append(objectId).append("\",");
+        payload.append("\"unique_id\":\"honda_e_").append(objectId).append("\",");
+        payload.append("\"state_topic\":\"").append(stateTopic).append("\",");
+        if (!unit.isEmpty()) {
+            payload.append("\"unit_of_measurement\":\"").append(unit).append("\",");
+        }
+        payload.append("\"icon\":\"").append(icon).append("\",");
+        payload.append("\"device\":{");
+        payload.append("\"identifiers\":[\"honda_e\"],");
+        payload.append("\"name\":\"Honda e Insight\",");
+        payload.append("\"model\":\"Honda e\",");
+        payload.append("\"manufacturer\":\"Honda\"");
+        payload.append("}");
+        payload.append("}");
+
         MqttMessage message = new MqttMessage(payload.toString().getBytes());
         message.setQos(1);
         message.setRetained(true);
