@@ -13,6 +13,11 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
+
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import android.view.KeyEvent;
 import android.view.MenuItem;
 import android.view.View;
@@ -154,6 +159,11 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     // MQTT Persistent Client
     private MqttClient _mqttClient;
     private MqttConnectOptions _mqttConnOpts;
+    
+    // Heartbeat Scheduler (10-second interval)
+    private ScheduledExecutorService _heartbeatScheduler;
+    private ScheduledFuture<?> _heartbeatTask;
+    private long _lastHeartbeatEpoch = 0;
 
     NotificationCompat.Builder _notificationBuilder;
     NotificationManagerCompat _notificationManagerCompat;
@@ -391,6 +401,14 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         // --- FIX: Stop loop to prevent phantom threads ---
         _loopRunning = false; 
         _mainHandler.removeCallbacks(_reconnectRunnable);
+        
+        // Stop heartbeat scheduler
+        if (_heartbeatTask != null && !_heartbeatTask.isCancelled()) {
+            _heartbeatTask.cancel(false);
+        }
+        if (_heartbeatScheduler != null && !_heartbeatScheduler.isShutdown()) {
+            _heartbeatScheduler.shutdown();
+        }
 
         try {
             if (_mqttClient != null && _mqttClient.isConnected()) {
@@ -497,6 +515,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             if (!_mqttClient.isConnected()) {
                 _mqttClient.connect(_mqttConnOpts);
                 subscribeCommandTopics();
+                startHeartbeatScheduler();
                 setText(_apiStatusText, "🔵"); 
             }
 
@@ -754,6 +773,18 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                     } else if (message.matches("\\d+\\.\\dV")) {
                         _auxBat = Double.parseDouble(message.substring(0, message.length() - 1));
                         setText(_auxBatText, message);
+                        // Count 12V message for publishing
+                        _newMessage++;
+                        // Immediately publish 12V value to MQTT
+                        if (_mqttRunning) {
+                            new Thread(() -> {
+                                try {
+                                    publishMqttTopic("status/aux_bat_v", message.substring(0, message.length() - 1));
+                                } catch (Exception e) {
+                                    // Silently skip on error
+                                }
+                            }).start();
+                        }
                     }
                     _viewModel.setNewMessageProcessed();
                 }
@@ -853,6 +884,35 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         MqttMessage message = new MqttMessage(payload.getBytes());
         message.setQos(0);
         _mqttClient.publish(MQTT_BASE_TOPIC + "/" + subTopic, message);
+    }
+    
+    private void startHeartbeatScheduler() {
+        if (_heartbeatScheduler == null || _heartbeatScheduler.isShutdown()) {
+            _heartbeatScheduler = Executors.newScheduledThreadPool(1);
+        }
+        
+        if (_heartbeatTask != null && !_heartbeatTask.isCancelled()) {
+            _heartbeatTask.cancel(false);
+        }
+        
+        _heartbeatTask = _heartbeatScheduler.scheduleAtFixedRate(() -> {
+            try {
+                _epoch = System.currentTimeMillis() / 1000;
+                
+                // Publish heartbeat
+                if (_mqttRunning && _lastHeartbeatEpoch + 9 < _epoch) {
+                    _lastHeartbeatEpoch = _epoch;
+                    publishMqttTopic("heartbeat/status", "online");
+                    publishMqttTopic("heartbeat/timestamp", String.valueOf(_epoch));
+                    
+                    // Also publish all current values
+                    publishMqttMessage();
+                    setText(_apiStatusText, "🔵");
+                }
+            } catch (Exception e) {
+                // Silently handle exceptions in heartbeat
+            }
+        }, 10, 10, TimeUnit.SECONDS);
     }
 
     private void parseVIN(String message) {
