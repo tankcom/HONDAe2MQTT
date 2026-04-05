@@ -12,9 +12,9 @@ A WIP Android App to read Real-Time-Data off of the Honda e via OBD2 ([thanks to
 - Die App kann per MQTT-Topic ferngesteuert werden:
 	- `hondae/cmd/connect` (Payload: `on`, `true`, `1`, `connect`, `enable` → Verbindung aufbauen; `off`, `false`, `0`, `disconnect`, `disable` → Verbindung trennen)
 	- `hondae/cmd/auto_reconnect` (Payload: analog wie oben; steuert den Auto-Reconnect-Toggle)
-	- `hondae/cmd/poll_fast_s` (Payload: Sekunden für Poll-Frequenz bis 3 Minuten nach letztem CAN-Datenpunkt)
-	- `hondae/cmd/poll_mid_s` (Payload: Sekunden für Poll-Frequenz zwischen 3 und 30 Minuten)
-	- `hondae/cmd/poll_slow_s` (Payload: Sekunden für Poll-Frequenz ab 30 Minuten)
+	- `hondae/cmd/poll_fast_s` (Payload: Integer-Sekunden für Poll-Frequenz bis 3 Minuten nach letztem CAN-Datenpunkt)
+	- `hondae/cmd/poll_mid_s` (Payload: Integer-Sekunden für Poll-Frequenz zwischen 3 und 30 Minuten)
+	- `hondae/cmd/poll_slow_s` (Payload: Integer-Sekunden für Poll-Frequenz ab 30 Minuten)
 - Die App hört automatisch auf diese Topics und setzt die Verbindung/Toggles entsprechend.
 
 ### MQTT Topic-Struktur
@@ -58,6 +58,9 @@ A WIP Android App to read Real-Time-Data off of the Honda e via OBD2 ([thanks to
 - Home Assistant erkennt die Sensoren sofort und erstellt automatisch Entities.
 - Die Sensoren sind im Device "Honda e Insight" organisiert mit eindeutiger Identifikation.
 - Discovery-Messages sind retained (QoS 1) für zuverlässige Erkennung.
+- Schreibbare Entitäten sind korrekt als bidirektionale HA-Controls angelegt:
+	- `switch`: Connect, Auto Reconnect (`command_topic` unter `hondae/cmd/*`, `state_topic` unter `hondae/status/*`)
+	- `number`: Poll Fast/Mid/Slow (`command_topic` unter `hondae/cmd/*`, `state_topic` unter `hondae/status/*`)
 
 ### Optimiertes MQTT Publishing
 - Sensoren-Topics werden nur aktualisiert, wenn sich der Wert tatsächlich ändert.

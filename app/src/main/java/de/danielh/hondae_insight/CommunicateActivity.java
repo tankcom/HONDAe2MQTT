@@ -1061,6 +1061,13 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         if (_discoveryPublished) return;
         try {
             String nodeId = "honda_e";
+
+            // Remove old retained sensor configs that are now writable controls.
+            clearHADiscoveryTopic("homeassistant/sensor/" + nodeId + "/auto_reconnect_enabled/config");
+            clearHADiscoveryTopic("homeassistant/sensor/" + nodeId + "/poll_fast_s/config");
+            clearHADiscoveryTopic("homeassistant/sensor/" + nodeId + "/poll_mid_s/config");
+            clearHADiscoveryTopic("homeassistant/sensor/" + nodeId + "/poll_slow_s/config");
+
             publishHADiscoverySensor(nodeId, "soc", "SoC", "%", "mdi:battery-charging");
             publishHADiscoverySensor(nodeId, "soc_min", "SoC Min", "%", "mdi:battery-low");
             publishHADiscoverySensor(nodeId, "soc_max", "SoC Max", "%", "mdi:battery-high");
@@ -1079,14 +1086,71 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             publishHADiscoverySensor(nodeId, "last_can_message", "Last CAN Message", "", "mdi:clock");
             publishHADiscoverySensor(nodeId, "last_can_message_ago_seconds", "Last CAN Seconds Ago", "s", "mdi:clock-outline");
             publishHADiscoverySensor(nodeId, "bt_connected", "BT Connected", "", "mdi:bluetooth");
-            publishHADiscoverySensor(nodeId, "auto_reconnect_enabled", "Auto Reconnect Enabled", "", "mdi:wifi-sync");
-            publishHADiscoverySensor(nodeId, "poll_fast_s", "Poll Fast", "s", "mdi:timer-fast");
-            publishHADiscoverySensor(nodeId, "poll_mid_s", "Poll Mid", "s", "mdi:timer-outline");
-            publishHADiscoverySensor(nodeId, "poll_slow_s", "Poll Slow", "s", "mdi:timer-sand");
+
+                // Writable entities (state + command)
+                publishHADiscoverySwitch(
+                    nodeId,
+                    "connect",
+                    "Connect",
+                    "mdi:bluetooth-connect",
+                    MQTT_BASE_TOPIC + "/status/bt_connected",
+                    MQTT_TOPIC_COMMAND_CONNECT,
+                    "connect",
+                    "disconnect");
+                publishHADiscoverySwitch(
+                    nodeId,
+                    "auto_reconnect_enabled",
+                    "Auto Reconnect Enabled",
+                    "mdi:wifi-sync",
+                    MQTT_BASE_TOPIC + "/status/auto_reconnect_enabled",
+                    MQTT_TOPIC_COMMAND_AUTO_RECONNECT,
+                    "enable",
+                    "disable");
+                publishHADiscoveryNumber(
+                    nodeId,
+                    "poll_fast_s",
+                    "Poll Fast",
+                    "mdi:timer-fast",
+                    MQTT_BASE_TOPIC + "/status/poll_fast_s",
+                    MQTT_TOPIC_COMMAND_POLL_FAST_SECONDS,
+                    1,
+                    3600,
+                    1,
+                    "s");
+                publishHADiscoveryNumber(
+                    nodeId,
+                    "poll_mid_s",
+                    "Poll Mid",
+                    "mdi:timer-outline",
+                    MQTT_BASE_TOPIC + "/status/poll_mid_s",
+                    MQTT_TOPIC_COMMAND_POLL_MID_SECONDS,
+                    1,
+                    3600,
+                    1,
+                    "s");
+                publishHADiscoveryNumber(
+                    nodeId,
+                    "poll_slow_s",
+                    "Poll Slow",
+                    "mdi:timer-sand",
+                    MQTT_BASE_TOPIC + "/status/poll_slow_s",
+                    MQTT_TOPIC_COMMAND_POLL_SLOW_SECONDS,
+                    1,
+                    3600,
+                    1,
+                    "s");
             _discoveryPublished = true;
         } catch (Exception e) {
             // Silently fail on discovery
         }
+    }
+
+    private void clearHADiscoveryTopic(String topic) throws Exception {
+        if (_mqttClient == null || !_mqttClient.isConnected()) return;
+        MqttMessage message = new MqttMessage(new byte[0]);
+        message.setQos(1);
+        message.setRetained(true);
+        _mqttClient.publish(topic, message);
     }
     
     private void publishHADiscoverySensor(String nodeId, String objectId, String name, String unit, String icon) throws Exception {
@@ -1117,6 +1181,83 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         payload.append("}");
         payload.append("}");
         
+        MqttMessage message = new MqttMessage(payload.toString().getBytes());
+        message.setQos(1);
+        message.setRetained(true);
+        _mqttClient.publish(topic, message);
+    }
+
+    private void publishHADiscoverySwitch(String nodeId,
+                                          String objectId,
+                                          String name,
+                                          String icon,
+                                          String stateTopic,
+                                          String commandTopic,
+                                          String payloadOn,
+                                          String payloadOff) throws Exception {
+        if (_mqttClient == null || !_mqttClient.isConnected()) return;
+
+        String topic = "homeassistant/switch/" + nodeId + "/" + objectId + "/config";
+        StringBuilder payload = new StringBuilder();
+        payload.append("{");
+        payload.append("\"name\":\"").append(name).append("\",");
+        payload.append("\"object_id\":\"").append(objectId).append("\",");
+        payload.append("\"unique_id\":\"honda_e_").append(objectId).append("\",");
+        payload.append("\"state_topic\":\"").append(stateTopic).append("\",");
+        payload.append("\"command_topic\":\"").append(commandTopic).append("\",");
+        payload.append("\"payload_on\":\"").append(payloadOn).append("\",");
+        payload.append("\"payload_off\":\"").append(payloadOff).append("\",");
+        payload.append("\"state_on\":\"true\",");
+        payload.append("\"state_off\":\"false\",");
+        payload.append("\"icon\":\"").append(icon).append("\",");
+        payload.append("\"device\":{");
+        payload.append("\"identifiers\":[\"honda_e\"],");
+        payload.append("\"name\":\"Honda e Insight\",");
+        payload.append("\"model\":\"Honda e\",");
+        payload.append("\"manufacturer\":\"Honda\"");
+        payload.append("}");
+        payload.append("}");
+
+        MqttMessage message = new MqttMessage(payload.toString().getBytes());
+        message.setQos(1);
+        message.setRetained(true);
+        _mqttClient.publish(topic, message);
+    }
+
+    private void publishHADiscoveryNumber(String nodeId,
+                                          String objectId,
+                                          String name,
+                                          String icon,
+                                          String stateTopic,
+                                          String commandTopic,
+                                          int min,
+                                          int max,
+                                          int step,
+                                          String unit) throws Exception {
+        if (_mqttClient == null || !_mqttClient.isConnected()) return;
+
+        String topic = "homeassistant/number/" + nodeId + "/" + objectId + "/config";
+        StringBuilder payload = new StringBuilder();
+        payload.append("{");
+        payload.append("\"name\":\"").append(name).append("\",");
+        payload.append("\"object_id\":\"").append(objectId).append("\",");
+        payload.append("\"unique_id\":\"honda_e_").append(objectId).append("\",");
+        payload.append("\"state_topic\":\"").append(stateTopic).append("\",");
+        payload.append("\"command_topic\":\"").append(commandTopic).append("\",");
+        payload.append("\"min\":").append(min).append(",");
+        payload.append("\"max\":").append(max).append(",");
+        payload.append("\"step\":").append(step).append(",");
+        payload.append("\"mode\":\"box\",");
+        payload.append("\"unit_of_measurement\":\"").append(unit).append("\",");
+        payload.append("\"icon\":\"").append(icon).append("\",");
+        payload.append("\"device\":{");
+        payload.append("\"identifiers\":[\"honda_e\"],");
+        payload.append("\"name\":\"Honda e Insight\",");
+        payload.append("\"model\":\"Honda e\",");
+        payload.append("\"manufacturer\":\"Honda\"");
+        payload.append("}");
+        payload.append("}");
+
         MqttMessage message = new MqttMessage(payload.toString().getBytes());
         message.setQos(1);
         message.setRetained(true);
