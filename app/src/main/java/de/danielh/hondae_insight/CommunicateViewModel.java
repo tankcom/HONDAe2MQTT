@@ -34,11 +34,13 @@ public class CommunicateViewModel extends AndroidViewModel {
     private boolean _connectionAttemptedOrMade = false;
     private boolean _viewModelSetup = false;
     private boolean _newMessage = false;
+    private boolean _manualDisconnectRequested = false;
 
     private final Object _newMessageParsed = new Object();
     private String _message = "";
     private String _messageID = "";
     private boolean _retry = true;
+    private boolean _autoReconnectEnabled = true;
 
     public CommunicateViewModel(@NotNull Application application) {
         super(application);
@@ -66,6 +68,8 @@ public class CommunicateViewModel extends AndroidViewModel {
             return;
         }
 
+        _manualDisconnectRequested = false;
+
         if (!_connectionAttemptedOrMade) {
             _connectionStatusData.postValue(ConnectionStatus.CONNECTING);
             _connectionAttemptedOrMade = true;
@@ -82,31 +86,51 @@ public class CommunicateViewModel extends AndroidViewModel {
                                 // This is critical for debugging why it fails
                                 String errorMsg = t.getMessage() != null ? t.getMessage() : "Unknown Error";
                                 toast("Connect Error: " + errorMsg);
-
-                                _connectionAttemptedOrMade = false;
-                                _connectionStatusData.postValue(ConnectionStatus.RETRY);
+                                handleTransportError(t);
                             }
                     ));
         }
     }
 
     public void disconnect() {
+        _manualDisconnectRequested = true;
         if (_connectionAttemptedOrMade && _deviceInterface != null) {
             _connectionAttemptedOrMade = false;
             _bluetoothManager.closeDevice(_deviceInterface);
             _deviceInterface = null;
         }
+        _connectionAttemptedOrMade = false;
         _connectionStatusData.postValue(ConnectionStatus.DISCONNECTED);
     }
 
     private void onConnected(SimpleBluetoothDeviceInterface deviceInterface) {
+        _manualDisconnectRequested = false;
         this._deviceInterface = deviceInterface;
         if (this._deviceInterface != null) {
             _connectionStatusData.postValue(ConnectionStatus.CONNECTED);
-            this._deviceInterface.setListeners(this::onMessageReceived, this::onMessageSent, t -> toast("Send Error: " + t.getMessage()));
+            this._deviceInterface.setListeners(this::onMessageReceived, this::onMessageSent, this::handleTransportError);
             toast(R.string.connected);
         } else {
             toast(R.string.connection_failed);
+            _connectionStatusData.postValue(ConnectionStatus.DISCONNECTED);
+        }
+    }
+
+    private void handleTransportError(Throwable t) {
+        String errorMsg = t != null && t.getMessage() != null ? t.getMessage() : "Unknown transport error";
+        toast("BT Error: " + errorMsg);
+
+        _deviceInterface = null;
+        _connectionAttemptedOrMade = false;
+
+        if (_manualDisconnectRequested) {
+            _connectionStatusData.postValue(ConnectionStatus.DISCONNECTED);
+            return;
+        }
+
+        if (_autoReconnectEnabled && _retry) {
+            _connectionStatusData.postValue(ConnectionStatus.RETRY);
+        } else {
             _connectionStatusData.postValue(ConnectionStatus.DISCONNECTED);
         }
     }
@@ -179,6 +203,8 @@ public class CommunicateViewModel extends AndroidViewModel {
     public void setNewMessageProcessed() { _newMessage = false; }
     public boolean isRetry() { return _retry; }
     public void setRetry(boolean _retry) { this._retry = _retry; }
+    public boolean isAutoReconnectEnabled() { return _autoReconnectEnabled; }
+    public void setAutoReconnectEnabled(boolean autoReconnectEnabled) { _autoReconnectEnabled = autoReconnectEnabled; }
 
     enum ConnectionStatus {
         DISCONNECTED,

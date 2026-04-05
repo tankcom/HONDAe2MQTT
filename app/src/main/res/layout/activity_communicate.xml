@@ -394,6 +394,26 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"/>
                     </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        android:layout_marginTop="8dp">
+
+                        <TextView
+                            android:text="@string/auto_reconnect"
+                            android:textColor="#FFFFFF"
+                            android:layout_weight="1"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"/>
+
+                        <Switch
+                            android:id="@+id/communicate_auto_reconnect_switch"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"/>
+                    </LinearLayout>
                     
                     <TextView android:id="@+id/communicate_vin" android:visibility="gone" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
                 </LinearLayout>

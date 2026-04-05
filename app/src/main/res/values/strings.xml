@@ -10,6 +10,7 @@
     <string name="status_connecting">Status: Connecting</string>
     <string name="status_connected">Status: Connected</string>
     <string name="status_disconnected">Status: Disconnected</string>
+    <string name="status_reconnecting">Status: Reconnecting</string>
     <string name="stop">Stop</string>
     <string name="connect">Connect</string>
     <string name="connected">Connected</string>
@@ -39,7 +40,7 @@
     
     <string name="mqtt_url_hint">tcp://user:pass@192.168.1.x:1883</string>
     
-    <string name="auto_reconnect">Auto reconnect</string>
+    <string name="auto_reconnect">Bluetooth Auto Reconnect</string>
     <string name="channel_name">Test-Channel</string>
     <string name="channel_description">Test-Description</string>
 

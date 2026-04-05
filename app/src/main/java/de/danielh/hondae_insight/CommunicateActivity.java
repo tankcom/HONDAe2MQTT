@@ -10,6 +10,8 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import android.view.KeyEvent;
 import android.view.MenuItem;
@@ -42,8 +44,10 @@ import java.util.Locale;
 
 // MQTT Imports
 import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttCallbackExtended;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
+import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 
 public class CommunicateActivity extends AppCompatActivity implements LocationListener {
@@ -65,8 +69,11 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     // PREFERENCES KEYS
     private static final String PREFS_KEY_MQTT_URL = "abrp_user_token";
     private static final String PREFS_KEY_MQTT_SWITCH = "iternioSendToAPISwitch";
-    
-    private static final int MAX_RETRY = 5;
+    private static final String PREFS_KEY_BT_AUTO_RECONNECT = "bt_auto_reconnect";
+
+    private static final String MQTT_BASE_TOPIC = "hondae";
+    private static final String MQTT_TOPIC_COMMAND_CONNECT = MQTT_BASE_TOPIC + "/cmd/connect";
+    private static final String MQTT_TOPIC_COMMAND_AUTO_RECONNECT = MQTT_BASE_TOPIC + "/cmd/auto_reconnect";
 
     private static final String NOTIFICATION_CHANNEL_ID = "SoC";
     private static final int NOTIFICATION_ID = 23;
@@ -100,6 +107,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     
     private EditText _mqttUrlText;
     private Switch _mqttSwitch;
+    private Switch _autoReconnectSwitch;
     
     private CheckBox _isChargingCheckBox;
     
@@ -133,9 +141,15 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private CommunicateViewModel _viewModel;
     private volatile boolean _loopRunning = false;
     private volatile boolean _mqttRunning = false;
-    private volatile int _retries = 0;
     private boolean _carConnected = false;
     private byte _newMessage;
+
+    private final Handler _mainHandler = new Handler(Looper.getMainLooper());
+    private final Runnable _reconnectRunnable = () -> {
+        if (_viewModel != null && _viewModel.isAutoReconnectEnabled() && _connectSwitch != null && _connectSwitch.isChecked()) {
+            _viewModel.connect();
+        }
+    };
 
     // MQTT Persistent Client
     private MqttClient _mqttClient;
@@ -177,6 +191,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
         // --- AUTO-CONNECT LOGIC END ---
 
         _preferences = getPreferences(MODE_PRIVATE);
+        _chargingConnection = ChargingConnection.NC;
 
         // Notification Setup
         _notificationBuilder = new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
@@ -216,6 +231,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
         // MQTT UI Setup
         _mqttUrlText = findViewById(R.id.communicate_mqtt_url);
         _mqttSwitch = findViewById(R.id.communicate_mqtt_switch);
+        _autoReconnectSwitch = findViewById(R.id.communicate_auto_reconnect_switch);
         
         // Setup Keyboard "Done" action
         _mqttUrlText.setImeOptions(EditorInfo.IME_ACTION_DONE);
@@ -245,6 +261,11 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
         _mqttSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> handleMqttSwitch(isChecked));
         _mqttSwitch.setChecked(_preferences.getBoolean(PREFS_KEY_MQTT_SWITCH, false));
         _mqttUrlText.setText(_preferences.getString(PREFS_KEY_MQTT_URL, "tcp://"));
+
+        _autoReconnectSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> handleAutoReconnectSwitch(isChecked));
+        boolean autoReconnectEnabled = _preferences.getBoolean(PREFS_KEY_BT_AUTO_RECONNECT, true);
+        _autoReconnectSwitch.setChecked(autoReconnectEnabled);
+        _viewModel.setAutoReconnectEnabled(autoReconnectEnabled);
 
         // Connection Switch Setup
         _connectSwitch = findViewById(R.id.communicate_connect);
@@ -293,8 +314,12 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     // --- FIX: Simplified Connection Switch Logic ---
     private void handleConnectionSwitch(CompoundButton buttonView, boolean isChecked) {
         if (isChecked) {
+            _mainHandler.removeCallbacks(_reconnectRunnable);
+            _viewModel.setRetry(true);
             _viewModel.connect();
         } else {
+            _mainHandler.removeCallbacks(_reconnectRunnable);
+            _viewModel.setRetry(false);
             _viewModel.disconnect();
         }
     }
@@ -308,6 +333,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 _connectionText.setText(R.string.status_connected);
                 _connectSwitch.setChecked(true);
                 _connectSwitch.setEnabled(true);
+                _mainHandler.removeCallbacks(_reconnectRunnable);
                 
                 // 2. Prevent double threads AND initialize the flag correctly
                 if (!_loopRunning) {
@@ -320,7 +346,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 _connectionText.setText(R.string.status_connecting);
                 _connectSwitch.setChecked(true);
                 _connectSwitch.setEnabled(true); 
-                _viewModel.setRetry(true);
+                _viewModel.setRetry(_viewModel.isAutoReconnectEnabled());
                 break;
 
             case DISCONNECTED:
@@ -329,13 +355,14 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 _connectSwitch.setChecked(false);
                 _connectSwitch.setEnabled(true);
                 closeLogFile();
-                _retries = 0;
+                _mainHandler.removeCallbacks(_reconnectRunnable);
                 break;
 
             case RETRY:
-                _retries++;
-                if (_viewModel.isRetry() && _retries < MAX_RETRY) {
-                    _viewModel.connect();
+                if (_viewModel.isAutoReconnectEnabled() && _connectSwitch.isChecked()) {
+                    _connectionText.setText(R.string.status_reconnecting);
+                    _mainHandler.removeCallbacks(_reconnectRunnable);
+                    _mainHandler.postDelayed(_reconnectRunnable, 3000);
                 } else {
                     _viewModel.disconnect();
                 }
@@ -363,6 +390,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
     protected void onDestroy() {
         // --- FIX: Stop loop to prevent phantom threads ---
         _loopRunning = false; 
+        _mainHandler.removeCallbacks(_reconnectRunnable);
 
         try {
             if (_mqttClient != null && _mqttClient.isConnected()) {
@@ -433,6 +461,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 _mqttConnOpts.setCleanSession(true);
                 _mqttConnOpts.setConnectionTimeout(10); 
                 _mqttConnOpts.setKeepAliveInterval(60); 
+                _mqttConnOpts.setAutomaticReconnect(true);
                 
                 if (username != null && !username.isEmpty()) {
                     _mqttConnOpts.setUserName(username);
@@ -443,10 +472,31 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
 
                 String clientId = "HondaE_Android_" + System.currentTimeMillis();
                 _mqttClient = new MqttClient(brokerUrl, clientId, new MemoryPersistence());
+                _mqttClient.setCallback(new MqttCallbackExtended() {
+                    @Override
+                    public void connectComplete(boolean reconnect, String serverURI) {
+                        subscribeCommandTopics();
+                    }
+
+                    @Override
+                    public void connectionLost(Throwable cause) {
+                        setText(_apiStatusText, "🔴");
+                    }
+
+                    @Override
+                    public void messageArrived(String topic, MqttMessage message) {
+                        handleMqttCommand(topic, new String(message.getPayload()));
+                    }
+
+                    @Override
+                    public void deliveryComplete(IMqttDeliveryToken token) {
+                    }
+                });
             }
 
             if (!_mqttClient.isConnected()) {
                 _mqttClient.connect(_mqttConnOpts);
+                subscribeCommandTopics();
                 setText(_apiStatusText, "🔵"); 
             }
 
@@ -462,28 +512,22 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             }
 
             if (_mqttClient != null && _mqttClient.isConnected()) {
-                String topic = "hondae/status";
-                String payload = "{" +
-                        "\"soc\":" + _soc +
-                        ",\"soh\":" + _soh +
-                        ",\"power\":" + _power +
-                        ",\"amp\":" + _amp +
-                        ",\"volt\":" + _volt +
-                        ",\"batt_temp\":" + _batTemp +
-                        ",\"ambient_temp\":" + _ambientTemp +
-                        ",\"is_charging\":" + _isCharging +
-                        ",\"charging_mode\":\"" + _chargingConnection.getName() + "\"" +
-                        ",\"speed\":" + _speed +
-                        ",\"odo\":" + _odo +
-                        ",\"lat\":" + _lat +
-                        ",\"lon\":" + _lon +
-                        ",\"elevation\":" + _elevation +
-                        ",\"timestamp\":" + _epoch +
-                        "}";
-
-                MqttMessage message = new MqttMessage(payload.getBytes());
-                message.setQos(0);
-                _mqttClient.publish(topic, message);
+                publishMqttTopic("status/soc", String.valueOf(_soc));
+                publishMqttTopic("status/soh", String.valueOf(_soh));
+                publishMqttTopic("status/power_kw", String.valueOf(_power));
+                publishMqttTopic("status/current_a", String.valueOf(_amp));
+                publishMqttTopic("status/voltage_v", String.valueOf(_volt));
+                publishMqttTopic("status/batt_temp_c", String.valueOf(_batTemp));
+                publishMqttTopic("status/ambient_temp_c", String.valueOf(_ambientTemp));
+                publishMqttTopic("status/is_charging", String.valueOf(_isCharging));
+                publishMqttTopic("status/charging_mode", _chargingConnection.getName());
+                publishMqttTopic("status/speed_kmh", String.valueOf(_speed));
+                publishMqttTopic("status/odo_km", String.valueOf(_odo));
+                publishMqttTopic("status/aux_bat_v", String.valueOf(_auxBat));
+                publishMqttTopic("gps/lat", _lat);
+                publishMqttTopic("gps/lon", _lon);
+                publishMqttTopic("gps/elevation_m", String.valueOf(_elevation));
+                publishMqttTopic("meta/timestamp", String.valueOf(_epoch));
 
                 _lastEpochSuccessfulApiSend = _epoch;
                 setText(_apiStatusText, "🔵"); 
@@ -509,48 +553,59 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
     }
 
     private void connectCAN() { 
-        try {
-            setText(_apiStatusText, "⚪");
-            for (String command : _connectionCommands) {
-                // IMPORTANT: Check loop state to exit early if disconnected
-                if (!_loopRunning) return;
+        setText(_apiStatusText, "⚪");
 
-                synchronized (_viewModel.getNewMessageParsed()) {
-                    _viewModel.sendMessage(command + "\n\r");
-                    _viewModel.getNewMessageParsed().wait(WAIT_FOR_NEW_MESSAGE_TIMEOUT);
-                    if (_viewModel.isNewMessage()) {
-                        final String message = _viewModel.getMessage();
-                        if (_viewModel.isNewMessage() && _viewModel.getMessageID().equals(VIN_ID)) {
-                            parseVIN(message);
-                            setText(_vinText, _vin);
-                            _carConnected = true;
-                            _viewModel.setNewMessageProcessed();
-                        } else if (_viewModel.isNewMessage()) {
-                            setText(_messageText, message);
-                            _viewModel.setNewMessageProcessed();
-                        }
-                        if (message.matches("\\d+\\.\\dV")) {
-                            _auxBat = Double.parseDouble(message.substring(0, message.length() - 1));
-                            setText(_auxBatText, message);
+        while (_loopRunning && !_carConnected) {
+            try {
+                for (String command : _connectionCommands) {
+                    // IMPORTANT: Check loop state to exit early if disconnected
+                    if (!_loopRunning) return;
+
+                    synchronized (_viewModel.getNewMessageParsed()) {
+                        _viewModel.sendMessage(command + "\n\r");
+                        _viewModel.getNewMessageParsed().wait(WAIT_FOR_NEW_MESSAGE_TIMEOUT);
+                        if (_viewModel.isNewMessage()) {
+                            final String message = _viewModel.getMessage();
+                            if (_viewModel.isNewMessage() && _viewModel.getMessageID().equals(VIN_ID)) {
+                                parseVIN(message);
+                                setText(_vinText, _vin);
+                                _carConnected = true;
+                                _viewModel.setNewMessageProcessed();
+                                break;
+                            } else if (_viewModel.isNewMessage()) {
+                                setText(_messageText, message);
+                                _viewModel.setNewMessageProcessed();
+                            }
+                            if (message.matches("\\d+\\.\\dV")) {
+                                _auxBat = Double.parseDouble(message.substring(0, message.length() - 1));
+                                setText(_auxBatText, message);
+                            }
                         }
                     }
+                    if (command.length() <= 6) {
+                        Thread.sleep(WAIT_TIME_BETWEEN_COMMAND_SENDS_MS);
+                    }
                 }
-                if (command.length() <= 6) {
-                    Thread.sleep(WAIT_TIME_BETWEEN_COMMAND_SENDS_MS);
-                }
-            }
 
-            if (_carConnected) {
+                if (!_carConnected) {
+                    setText(_messageText, "CAN not responding, BT bleibt verbunden...");
+                    Thread.sleep(2000);
+                }
+            } catch (InterruptedException e) {
+                // Thread interrupted, likely due to disconnect
+                _loopRunning = false;
+                return;
+            }
+        }
+
+        if (_carConnected && _loopRunning) {
+            try {
                 Thread.sleep(WAIT_FOR_NEW_MESSAGE_TIMEOUT);
                 openNewFileForWriting();
                 loop();
-            } else {
-                setText(_messageText, "CAN not responding...");
-                _viewModel.disconnect();
+            } catch (InterruptedException e) {
+                _loopRunning = false;
             }
-        } catch (InterruptedException e) {
-            // Thread interrupted, likely due to disconnect
-            _loopRunning = false;
         }
     }
 
@@ -740,7 +795,64 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         
         if (isChecked) {
             restartMqtt();
+        } else {
+            connectToMqtt();
         }
+    }
+
+    private void handleAutoReconnectSwitch(boolean isChecked) {
+        _viewModel.setAutoReconnectEnabled(isChecked);
+        _viewModel.setRetry(isChecked);
+        SharedPreferences.Editor edit = _preferences.edit();
+        edit.putBoolean(PREFS_KEY_BT_AUTO_RECONNECT, isChecked);
+        edit.apply();
+    }
+
+    private void subscribeCommandTopics() {
+        try {
+            if (_mqttClient != null && _mqttClient.isConnected()) {
+                _mqttClient.subscribe(MQTT_TOPIC_COMMAND_CONNECT, 1);
+                _mqttClient.subscribe(MQTT_TOPIC_COMMAND_AUTO_RECONNECT, 1);
+            }
+        } catch (Exception e) {
+            setText(_apiStatusText, "🔴");
+        }
+    }
+
+    private void handleMqttCommand(String topic, String payloadRaw) {
+        final String payload = payloadRaw == null ? "" : payloadRaw.trim().toLowerCase(Locale.ENGLISH);
+        runOnUiThread(() -> {
+            if (MQTT_TOPIC_COMMAND_CONNECT.equals(topic)) {
+                if (isOnPayload(payload)) {
+                    _connectSwitch.setChecked(true);
+                } else if (isOffPayload(payload)) {
+                    _connectSwitch.setChecked(false);
+                }
+            } else if (MQTT_TOPIC_COMMAND_AUTO_RECONNECT.equals(topic)) {
+                if (isOnPayload(payload)) {
+                    _autoReconnectSwitch.setChecked(true);
+                } else if (isOffPayload(payload)) {
+                    _autoReconnectSwitch.setChecked(false);
+                }
+            }
+        });
+    }
+
+    private boolean isOnPayload(String payload) {
+        return "1".equals(payload) || "true".equals(payload) || "on".equals(payload) || "connect".equals(payload) || "enable".equals(payload) || "enabled".equals(payload);
+    }
+
+    private boolean isOffPayload(String payload) {
+        return "0".equals(payload) || "false".equals(payload) || "off".equals(payload) || "disconnect".equals(payload) || "disable".equals(payload) || "disabled".equals(payload);
+    }
+
+    private void publishMqttTopic(String subTopic, String payload) throws Exception {
+        if (_mqttClient == null || !_mqttClient.isConnected()) {
+            return;
+        }
+        MqttMessage message = new MqttMessage(payload.getBytes());
+        message.setQos(0);
+        _mqttClient.publish(MQTT_BASE_TOPIC + "/" + subTopic, message);
     }
 
     private void parseVIN(String message) {
