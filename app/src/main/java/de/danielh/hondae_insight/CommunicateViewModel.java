@@ -70,6 +70,9 @@ public class CommunicateViewModel extends AndroidViewModel {
 
         _manualDisconnectRequested = false;
 
+        // Ensure no stale socket/interface survives between retries.
+        closeActiveDeviceQuietly();
+
         if (!_connectionAttemptedOrMade) {
             _connectionStatusData.postValue(ConnectionStatus.CONNECTING);
             _connectionAttemptedOrMade = true;
@@ -82,10 +85,6 @@ public class CommunicateViewModel extends AndroidViewModel {
                     .subscribe(
                             device -> onConnected(device.toSimpleDeviceInterface()),
                             t -> {
-                                // SHOW THE REAL ERROR TOAST
-                                // This is critical for debugging why it fails
-                                String errorMsg = t.getMessage() != null ? t.getMessage() : "Unknown Error";
-                                toast("Connect Error: " + errorMsg);
                                 handleTransportError(t);
                             }
                     ));
@@ -94,12 +93,7 @@ public class CommunicateViewModel extends AndroidViewModel {
 
     public void disconnect() {
         _manualDisconnectRequested = true;
-        if (_connectionAttemptedOrMade && _deviceInterface != null) {
-            _connectionAttemptedOrMade = false;
-            _bluetoothManager.closeDevice(_deviceInterface);
-            _deviceInterface = null;
-        }
-        _connectionAttemptedOrMade = false;
+        closeActiveDeviceQuietly();
         _connectionStatusData.postValue(ConnectionStatus.DISCONNECTED);
     }
 
@@ -109,7 +103,6 @@ public class CommunicateViewModel extends AndroidViewModel {
         if (this._deviceInterface != null) {
             _connectionStatusData.postValue(ConnectionStatus.CONNECTED);
             this._deviceInterface.setListeners(this::onMessageReceived, this::onMessageSent, this::handleTransportError);
-            toast(R.string.connected);
         } else {
             toast(R.string.connection_failed);
             _connectionStatusData.postValue(ConnectionStatus.DISCONNECTED);
@@ -120,8 +113,7 @@ public class CommunicateViewModel extends AndroidViewModel {
         String errorMsg = t != null && t.getMessage() != null ? t.getMessage() : "Unknown transport error";
         toast("BT Error: " + errorMsg);
 
-        _deviceInterface = null;
-        _connectionAttemptedOrMade = false;
+        closeActiveDeviceQuietly();
 
         if (_manualDisconnectRequested) {
             _connectionStatusData.postValue(ConnectionStatus.DISCONNECTED);
@@ -172,14 +164,29 @@ public class CommunicateViewModel extends AndroidViewModel {
 
     public void sendMessage(String message) {
         if (_deviceInterface != null && !TextUtils.isEmpty(message)) {
-            _deviceInterface.sendMessage(message);
+            try {
+                _deviceInterface.sendMessage(message);
+            } catch (Exception e) {
+                handleTransportError(e);
+            }
         }
+    }
+
+    private void closeActiveDeviceQuietly() {
+        if (_bluetoothManager != null && _deviceInterface != null) {
+            try {
+                _bluetoothManager.closeDevice(_deviceInterface);
+            } catch (Exception ignored) {
+            }
+        }
+        _deviceInterface = null;
+        _connectionAttemptedOrMade = false;
     }
 
     @Override
     protected void onCleared() {
         _compositeDisposable.dispose();
-        // Do NOT close _bluetoothManager here.
+        closeActiveDeviceQuietly();
     }
 
     // Updated toast to handle Strings directly
