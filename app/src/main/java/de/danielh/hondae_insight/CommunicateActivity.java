@@ -64,6 +64,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     public static final int WAIT_TIME_BETWEEN_COMMAND_SENDS_MS = 50;
     public static final int PARK_STAGE_1_SECONDS = 3 * 60;
     public static final int PARK_STAGE_2_SECONDS = 30 * 60;
+    public static final int BT_DISCONNECT_DEBOUNCE_SECONDS = 12;
 
     // CAN Command IDs
     public static final String VIN_ID = "1862F190";
@@ -72,43 +73,6 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     public static final String SOC_ID = "F6622029";
     public static final String BATTEMP_ID = "F662202A";
     public static final String ODO_ID = "39627022";
-    private long getCurrentPollingIntervalMs() {
-        long now = System.currentTimeMillis() / 1000;
-        long referenceEpoch = _lastCanMessageEpoch > 0 ? _lastCanMessageEpoch : _btConnectedSinceEpoch;
-        long secondsSinceReference = referenceEpoch > 0 ? Math.max(0, now - referenceEpoch) : 0;
-
-        int pollSeconds;
-        if (secondsSinceReference <= PARK_STAGE_1_SECONDS) {
-            pollSeconds = _pollFastSeconds;
-        } else if (secondsSinceReference <= PARK_STAGE_2_SECONDS) {
-            pollSeconds = _pollMidSeconds;
-        } else {
-            pollSeconds = _pollSlowSeconds;
-        }
-
-        return Math.max(1, pollSeconds) * 1000L;
-    }
-
-    private void publishControlStatusAsync() {
-        if (!_mqttRunning) {
-            return;
-        }
-
-        new Thread(() -> {
-            try {
-                if (_mqttClient == null || !_mqttClient.isConnected()) {
-                    connectToMqtt();
-                }
-                publishMqttTopic("status/bt_connected", String.valueOf(_bluetoothConnected));
-                publishMqttTopic("status/auto_reconnect_enabled", String.valueOf(_viewModel.isAutoReconnectEnabled()));
-                publishMqttTopic("status/poll_fast_s", String.valueOf(_pollFastSeconds));
-                publishMqttTopic("status/poll_mid_s", String.valueOf(_pollMidSeconds));
-                publishMqttTopic("status/poll_slow_s", String.valueOf(_pollSlowSeconds));
-            } catch (Exception ignored) {
-            }
-        }).start();
-    }
-
 
     public static final int RANGE_ESTIMATE_WINDOW_5KM = 5;
 
@@ -217,6 +181,10 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
         if (_viewModel != null && _viewModel.isAutoReconnectEnabled() && _connectSwitch != null && _connectSwitch.isChecked()) {
             _viewModel.connect();
         }
+    };
+    private final Runnable _publishBtDisconnectedRunnable = () -> {
+        _bluetoothConnected = false;
+        publishControlStatusAsync();
     };
 
     // MQTT Persistent Client
@@ -406,6 +374,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 _connectionText.setText(R.string.status_connected);
                 _connectSwitch.setChecked(true);
                 _connectSwitch.setEnabled(true);
+                _mainHandler.removeCallbacks(_publishBtDisconnectedRunnable);
                 _bluetoothConnected = true;
                 _btConnectedSinceEpoch = System.currentTimeMillis() / 1000;
                 _mainHandler.removeCallbacks(_reconnectRunnable);
@@ -430,10 +399,16 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 _connectionText.setText(R.string.status_disconnected);
                 _connectSwitch.setChecked(false);
                 _connectSwitch.setEnabled(true);
-                _bluetoothConnected = false;
                 closeLogFile();
                 _mainHandler.removeCallbacks(_reconnectRunnable);
-                publishControlStatusAsync();
+
+                // Avoid false/true flapping in HA while reconnect succeeds quickly.
+                _mainHandler.removeCallbacks(_publishBtDisconnectedRunnable);
+                if (_viewModel.isAutoReconnectEnabled()) {
+                    _mainHandler.postDelayed(_publishBtDisconnectedRunnable, BT_DISCONNECT_DEBOUNCE_SECONDS * 1000L);
+                } else {
+                    _publishBtDisconnectedRunnable.run();
+                }
                 break;
 
             case RETRY:
@@ -469,6 +444,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         // --- FIX: Stop loop to prevent phantom threads ---
         _loopRunning = false; 
         _mainHandler.removeCallbacks(_reconnectRunnable);
+        _mainHandler.removeCallbacks(_publishBtDisconnectedRunnable);
         
         // Stop heartbeat scheduler
         if (_heartbeatTask != null && !_heartbeatTask.isCancelled()) {
@@ -1329,6 +1305,43 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 // Silently handle exceptions in heartbeat
             }
         }, 10, 10, TimeUnit.SECONDS);
+    }
+
+    private long getCurrentPollingIntervalMs() {
+        long now = System.currentTimeMillis() / 1000;
+        long referenceEpoch = _lastCanMessageEpoch > 0 ? _lastCanMessageEpoch : _btConnectedSinceEpoch;
+        long secondsSinceReference = referenceEpoch > 0 ? Math.max(0, now - referenceEpoch) : 0;
+
+        int pollSeconds;
+        if (secondsSinceReference <= PARK_STAGE_1_SECONDS) {
+            pollSeconds = _pollFastSeconds;
+        } else if (secondsSinceReference <= PARK_STAGE_2_SECONDS) {
+            pollSeconds = _pollMidSeconds;
+        } else {
+            pollSeconds = _pollSlowSeconds;
+        }
+
+        return Math.max(1, pollSeconds) * 1000L;
+    }
+
+    private void publishControlStatusAsync() {
+        if (!_mqttRunning) {
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                if (_mqttClient == null || !_mqttClient.isConnected()) {
+                    connectToMqtt();
+                }
+                publishMqttTopic("status/bt_connected", String.valueOf(_bluetoothConnected));
+                publishMqttTopic("status/auto_reconnect_enabled", String.valueOf(_viewModel.isAutoReconnectEnabled()));
+                publishMqttTopic("status/poll_fast_s", String.valueOf(_pollFastSeconds));
+                publishMqttTopic("status/poll_mid_s", String.valueOf(_pollMidSeconds));
+                publishMqttTopic("status/poll_slow_s", String.valueOf(_pollSlowSeconds));
+            } catch (Exception ignored) {
+            }
+        }).start();
     }
 
     private void parseVIN(String message) {

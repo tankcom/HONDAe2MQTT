@@ -70,25 +70,24 @@ public class CommunicateViewModel extends AndroidViewModel {
 
         _manualDisconnectRequested = false;
 
-        // Ensure no stale socket/interface survives between retries.
-        closeActiveDeviceQuietly();
-
-        if (!_connectionAttemptedOrMade) {
-            _connectionStatusData.postValue(ConnectionStatus.CONNECTING);
-            _connectionAttemptedOrMade = true;
-
-            // Connect asynchronously
-            _compositeDisposable.add(_bluetoothManager.openSerialDevice(_mac)
-                    .subscribeOn(Schedulers.io())
-                    .observeOn(AndroidSchedulers.mainThread())
-                    // Removed the invalid onErrorResumeNext block
-                    .subscribe(
-                            device -> onConnected(device.toSimpleDeviceInterface()),
-                            t -> {
-                                handleTransportError(t);
-                            }
-                    ));
+        // Prevent re-entering connect while already connected/connecting.
+        if (_connectionAttemptedOrMade) {
+            return;
         }
+
+        // Only clear stale leftover handles once, right before a new attempt.
+        closeActiveDeviceQuietly();
+        _connectionStatusData.postValue(ConnectionStatus.CONNECTING);
+        _connectionAttemptedOrMade = true;
+
+        // Connect asynchronously
+        _compositeDisposable.add(_bluetoothManager.openSerialDevice(_mac)
+                .subscribeOn(Schedulers.io())
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(
+                        device -> onConnected(device.toSimpleDeviceInterface()),
+                        this::handleTransportError
+                ));
     }
 
     public void disconnect() {
