@@ -137,6 +137,18 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private ChargingConnection _chargingConnection;
     private boolean _isCharging;
     
+    // Previous values for selective MQTT publishing
+    private double _lastPublishedSoc = -1, _lastPublishedSocMin = -1, _lastPublishedSocMax = -1, _lastPublishedSocDelta = -1;
+    private double _lastPublishedSoh = -1, _lastPublishedSpeed = -1, _lastPublishedPower = -1, _lastPublishedBatTemp = -1;
+    private double _lastPublishedAmp = -1, _lastPublishedVolt = -1, _lastPublishedAuxBat = -1;
+    private byte _lastPublishedAmbientTemp = Byte.MIN_VALUE;
+    private int _lastPublishedOdo = Integer.MIN_VALUE;
+    private String _lastPublishedLat = null, _lastPublishedLon = null;
+    private double _lastPublishedElevation = -1;
+    private ChargingConnection _lastPublishedChargingConnection = null;
+    private boolean _lastPublishedIsCharging = false;
+    private boolean _discoveryPublished = false;
+    
     // System Variables
     private PrintWriter _logFileWriter;
     private SharedPreferences _preferences;
@@ -148,6 +160,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private volatile boolean _mqttRunning = false;
     private boolean _carConnected = false;
     private byte _newMessage;
+    private long _lastCanMessageEpoch = 0;
 
     private final Handler _mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable _reconnectRunnable = () -> {
@@ -515,6 +528,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             if (!_mqttClient.isConnected()) {
                 _mqttClient.connect(_mqttConnOpts);
                 subscribeCommandTopics();
+                publishHomeAssistantDiscovery();
                 startHeartbeatScheduler();
                 setText(_apiStatusText, "🔵"); 
             }
@@ -531,22 +545,83 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             }
 
             if (_mqttClient != null && _mqttClient.isConnected()) {
-                publishMqttTopic("status/soc", String.valueOf(_soc));
-                publishMqttTopic("status/soh", String.valueOf(_soh));
-                publishMqttTopic("status/power_kw", String.valueOf(_power));
-                publishMqttTopic("status/current_a", String.valueOf(_amp));
-                publishMqttTopic("status/voltage_v", String.valueOf(_volt));
-                publishMqttTopic("status/batt_temp_c", String.valueOf(_batTemp));
-                publishMqttTopic("status/ambient_temp_c", String.valueOf(_ambientTemp));
-                publishMqttTopic("status/is_charging", String.valueOf(_isCharging));
-                publishMqttTopic("status/charging_mode", _chargingConnection.getName());
-                publishMqttTopic("status/speed_kmh", String.valueOf(_speed));
-                publishMqttTopic("status/odo_km", String.valueOf(_odo));
-                publishMqttTopic("status/aux_bat_v", String.valueOf(_auxBat));
-                publishMqttTopic("gps/lat", _lat);
-                publishMqttTopic("gps/lon", _lon);
-                publishMqttTopic("gps/elevation_m", String.valueOf(_elevation));
+                if (_lastPublishedSoc != _soc && _soc != 0) {
+                    publishMqttTopic("status/soc", String.valueOf(_soc));
+                    _lastPublishedSoc = _soc;
+                }
+                if (_lastPublishedSocMin != _socMin) {
+                    publishMqttTopic("status/soc_min", String.valueOf(_socMin));
+                    _lastPublishedSocMin = _socMin;
+                }
+                if (_lastPublishedSocMax != _socMax) {
+                    publishMqttTopic("status/soc_max", String.valueOf(_socMax));
+                    _lastPublishedSocMax = _socMax;
+                }
+                if (_lastPublishedSocDelta != _socDelta) {
+                    publishMqttTopic("status/soc_delta", String.valueOf(_socDelta));
+                    _lastPublishedSocDelta = _socDelta;
+                }
+                if (_lastPublishedSoh != _soh && _soh != 0) {
+                    publishMqttTopic("status/soh", String.valueOf(_soh));
+                    _lastPublishedSoh = _soh;
+                }
+                if (_lastPublishedPower != _power) {
+                    publishMqttTopic("status/power_kw", String.valueOf(_power));
+                    _lastPublishedPower = _power;
+                }
+                if (_lastPublishedAmp != _amp) {
+                    publishMqttTopic("status/current_a", String.valueOf(_amp));
+                    _lastPublishedAmp = _amp;
+                }
+                if (_lastPublishedVolt != _volt && _volt != 0) {
+                    publishMqttTopic("status/voltage_v", String.valueOf(_volt));
+                    _lastPublishedVolt = _volt;
+                }
+                if (_lastPublishedBatTemp != _batTemp && _batTemp != 0) {
+                    publishMqttTopic("status/batt_temp_c", String.valueOf(_batTemp));
+                    _lastPublishedBatTemp = _batTemp;
+                }
+                if (_lastPublishedAmbientTemp != _ambientTemp && _ambientTemp != 0) {
+                    publishMqttTopic("status/ambient_temp_c", String.valueOf(_ambientTemp));
+                    _lastPublishedAmbientTemp = _ambientTemp;
+                }
+                if (_lastPublishedIsCharging != _isCharging) {
+                    publishMqttTopic("status/is_charging", String.valueOf(_isCharging));
+                    _lastPublishedIsCharging = _isCharging;
+                }
+                if (_lastPublishedChargingConnection != _chargingConnection) {
+                    publishMqttTopic("status/charging_mode", _chargingConnection.getName());
+                    _lastPublishedChargingConnection = _chargingConnection;
+                }
+                if (_lastPublishedSpeed != _speed) {
+                    publishMqttTopic("status/speed_kmh", String.valueOf(_speed));
+                    _lastPublishedSpeed = _speed;
+                }
+                if (_lastPublishedOdo != _odo && _odo != 0) {
+                    publishMqttTopic("status/odo_km", String.valueOf(_odo));
+                    _lastPublishedOdo = _odo;
+                }
+                if (_lastPublishedAuxBat != _auxBat && _auxBat != 0) {
+                    publishMqttTopic("status/aux_bat_v", String.valueOf(_auxBat));
+                    _lastPublishedAuxBat = _auxBat;
+                }
+                if (_lastPublishedLat == null || !_lastPublishedLat.equals(_lat)) {
+                    publishMqttTopic("gps/lat", _lat);
+                    _lastPublishedLat = _lat;
+                }
+                if (_lastPublishedLon == null || !_lastPublishedLon.equals(_lon)) {
+                    publishMqttTopic("gps/lon", _lon);
+                    _lastPublishedLon = _lon;
+                }
+                if (_lastPublishedElevation != _elevation) {
+                    publishMqttTopic("gps/elevation_m", String.valueOf(_elevation));
+                    _lastPublishedElevation = _elevation;
+                }
                 publishMqttTopic("meta/timestamp", String.valueOf(_epoch));
+                
+                // Publish responsive status topics
+                publishMqttTopic("status/bt_connected", String.valueOf(_carConnected));
+                publishMqttTopic("status/auto_reconnect_enabled", String.valueOf(_viewModel.isAutoReconnectEnabled()));
 
                 _lastEpochSuccessfulApiSend = _epoch;
                 setText(_apiStatusText, "🔵"); 
@@ -709,6 +784,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                         if (message.length() >= 44) {
                             _ambientTemp = Integer.valueOf(message.substring(42, 44), 16).byteValue();
                             _newMessage++;
+                            _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
                         }
                     } else if (messageID.equals(SOH_ID)) {
                         if (message.length() >= 285) {
@@ -717,6 +793,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                             _volt = Integer.parseInt(message.substring(76, 80), 16) / 10.0;
                             _power = Math.round(_amp * _volt / 1000.0 * 10.0) / 10.0;
                             _newMessage++;
+                            _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
                         }
                     } else if (messageID.equals(SOC_ID)) {
                         if (message.length() >= 280) {
@@ -736,15 +813,18 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                                 default: _chargingConnection = ChargingConnection.NC;
                             }
                             _newMessage++;
+                            _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
                         }
                     } else if (messageID.equals(BATTEMP_ID)) {
                         if (message.length() >= 415) {
                             _batTemp = Integer.valueOf(message.substring(410, 414), 16).shortValue() / 10.0;
                             _newMessage++;
+                            _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
                         }
                     } else if (messageID.equals(ODO_ID)) {
                         if (message.length() >= 26) {
                             _odo = Integer.parseInt(message.substring(18, 26), 16);
+                            _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
                             if (_lastOdo < _odo) {
                                 _lastOdo = _odo;
                                 _socHistory[_socHistoryPosition] = _soc;
@@ -886,6 +966,67 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         _mqttClient.publish(MQTT_BASE_TOPIC + "/" + subTopic, message);
     }
     
+    private void publishHomeAssistantDiscovery() {
+        if (_discoveryPublished) return;
+        try {
+            String nodeId = "honda_e";
+            publishHADiscoverySensor(nodeId, "soc", "SoC", "%", "mdi:battery-charging");
+            publishHADiscoverySensor(nodeId, "soc_min", "SoC Min", "%", "mdi:battery-low");
+            publishHADiscoverySensor(nodeId, "soc_max", "SoC Max", "%", "mdi:battery-high");
+            publishHADiscoverySensor(nodeId, "soc_delta", "SoC Delta", "%", "mdi:delta");
+            publishHADiscoverySensor(nodeId, "soh", "SoH", "%", "mdi:heart-pulse");
+            publishHADiscoverySensor(nodeId, "power_kw", "Power", "kW", "mdi:lightning-bolt");
+            publishHADiscoverySensor(nodeId, "current_a", "Current", "A", "mdi:current-ac");
+            publishHADiscoverySensor(nodeId, "voltage_v", "Voltage", "V", "mdi:sine-wave");
+            publishHADiscoverySensor(nodeId, "batt_temp_c", "Battery Temp", "°C", "mdi:thermometer");
+            publishHADiscoverySensor(nodeId, "ambient_temp_c", "Ambient Temp", "°C", "mdi:thermometer-lines");
+            publishHADiscoverySensor(nodeId, "speed_kmh", "Speed", "km/h", "mdi:speedometer");
+            publishHADiscoverySensor(nodeId, "odo_km", "Odometer", "km", "mdi:map-marker-distance");
+            publishHADiscoverySensor(nodeId, "aux_bat_v", "12V Battery", "V", "mdi:car-battery");
+            publishHADiscoverySensor(nodeId, "is_charging", "Is Charging", "", "mdi:battery-charging");
+            publishHADiscoverySensor(nodeId, "charging_mode", "Charging Mode", "", "mdi:plug");
+            publishHADiscoverySensor(nodeId, "last_can_message", "Last CAN Message", "", "mdi:clock");
+            publishHADiscoverySensor(nodeId, "last_can_message_ago_seconds", "Last CAN Seconds Ago", "s", "mdi:clock-outline");
+            _discoveryPublished = true;
+        } catch (Exception e) {
+            // Silently fail on discovery
+        }
+    }
+    
+    private void publishHADiscoverySensor(String nodeId, String objectId, String name, String unit, String icon) throws Exception {
+        if (_mqttClient == null || !_mqttClient.isConnected()) return;
+        
+        String topic = "homeassistant/sensor/" + nodeId + "/" + objectId + "/config";
+        String stateTopic = MQTT_BASE_TOPIC + "/status/" + objectId;
+        
+        if (objectId.startsWith("last_can")) {
+            stateTopic = MQTT_BASE_TOPIC + "/meta/" + objectId;
+        }
+        
+        StringBuilder payload = new StringBuilder();
+        payload.append("{");
+        payload.append("\"name\":\"").append(name).append("\",");
+        payload.append("\"object_id\":\"").append(objectId).append("\",");
+        payload.append("\"unique_id\":\"honda_e_").append(objectId).append("\",");
+        payload.append("\"state_topic\":\"").append(stateTopic).append("\",");
+        if (!unit.isEmpty()) {
+            payload.append("\"unit_of_measurement\":\"").append(unit).append("\",");
+        }
+        payload.append("\"icon\":\"").append(icon).append("\",");
+        payload.append("\"device\":{");
+        payload.append("\"identifiers\":[\"honda_e\"],");
+        payload.append("\"name\":\"Honda e Insight\",");
+        payload.append("\"model\":\"Honda e\",");
+        payload.append("\"manufacturer\":\"Honda\"");
+        payload.append("}");
+        payload.append("}");
+        
+        MqttMessage message = new MqttMessage(payload.toString().getBytes());
+        message.setQos(1);
+        message.setRetained(true);
+        _mqttClient.publish(topic, message);
+    }
+    
     private void startHeartbeatScheduler() {
         if (_heartbeatScheduler == null || _heartbeatScheduler.isShutdown()) {
             _heartbeatScheduler = Executors.newScheduledThreadPool(1);
@@ -904,6 +1045,13 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                     _lastHeartbeatEpoch = _epoch;
                     publishMqttTopic("heartbeat/status", "online");
                     publishMqttTopic("heartbeat/timestamp", String.valueOf(_epoch));
+                    
+                    // Publish last successful CAN message timestamp
+                    if (_lastCanMessageEpoch > 0) {
+                        long secondsSinceLastCan = _epoch - _lastCanMessageEpoch;
+                        publishMqttTopic("meta/last_can_message", String.valueOf(_lastCanMessageEpoch));
+                        publishMqttTopic("meta/last_can_message_ago_seconds", String.valueOf(secondsSinceLastCan));
+                    }
                     
                     // Also publish all current values
                     publishMqttMessage();

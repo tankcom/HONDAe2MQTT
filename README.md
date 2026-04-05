@@ -18,6 +18,9 @@ A WIP Android App to read Real-Time-Data off of the Honda e via OBD2 ([thanks to
 - Sensorwerte werden jetzt auf **einzelnen Topics** veröffentlicht (statt als JSON in einem Topic):
 
 	- `hondae/status/soc` (State of Charge)
+	- `hondae/status/soc_min` (Min SoC)
+	- `hondae/status/soc_max` (Max SoC)
+	- `hondae/status/soc_delta` (SoC Delta)
 	- `hondae/status/soh` (State of Health)
 	- `hondae/status/power_kw`
 	- `hondae/status/current_a`
@@ -26,18 +29,50 @@ A WIP Android App to read Real-Time-Data off of the Honda e via OBD2 ([thanks to
 	- `hondae/status/ambient_temp_c`
 	- `hondae/status/is_charging`
 	- `hondae/status/charging_mode`
+	- `hondae/status/speed_kmh`
 	- `hondae/status/odo_km`
 	- `hondae/status/aux_bat_v` (auch wenn Auto aus ist)
 	- `hondae/gps/lat`, `hondae/gps/lon`, `hondae/gps/elevation_m`
 	- `hondae/meta/timestamp`
 	- `hondae/heartbeat/status` (publiziert `online` alle 10 Sekunden)
 	- `hondae/heartbeat/timestamp` (Unix-Timestamp der Heartbeat)
+	- `hondae/meta/last_can_message` (Unix-Timestamp der letzten erfolgreichen CAN-Nachricht)
+	- `hondae/meta/last_can_message_ago_seconds` (Sekunden seit der letzten CAN-Nachricht)
+	- `hondae/status/bt_connected` (true/false - aktueller Verbindungsstatus mit Auto)
+	- `hondae/status/auto_reconnect_enabled` (true/false - aktueller Toggle-Status für Auto-Reconnect)
 
 ### Heartbeat-Mechanismus
-- Die App publiciert automatisch alle 10 Sekunden einen Heartbeat auf `hondae/heartbeat/status` mit dem Wert `online`.
+- Die App publiziert automatisch alle 10 Sekunden einen Heartbeat auf `hondae/heartbeat/status` mit dem Wert `online`.
 - Dies funktioniert auch, wenn das Auto aus ist (12V ist verfügbar).
-- Der Heartbeat triggert auch eine komplette MQTT-Publish aller aktuellen Sensordaten.
+- Der Heartbeat triggert auch eine MQTT-Publish aller aktuellen Sensordaten (nur wenn sich Werte geändert haben).
 - Damit kann man zuverlässig prüfen, ob die App noch mit dem MQTT-Broker verbunden und aktiv ist.
+
+### Home Assistant Auto Discovery
+- Die App publiziert beim MQTT-Connect automatisch MQTT Discovery-Messages für alle Sensoren.
+- Home Assistant erkennt die Sensoren sofort und erstellt automatisch Entities.
+- Die Sensoren sind im Device "Honda e Insight" organisiert mit eindeutiger Identifikation.
+- Discovery-Messages sind retained (QoS 1) für zuverlässige Erkennung.
+
+### Optimiertes MQTT Publishing
+- Sensoren-Topics werden nur aktualisiert, wenn sich der Wert tatsächlich ändert.
+- Verhindert unnötige MQTT-Messages und reduziert Traffic zum Broker.
+- Beispiel: Wenn SoC unverändert bleibt, wird das Topic nicht erneut published.
+- Als Resultat: minimale Last auf MQTT-Broker und Speicherverbrauch.
+
+### Responsive Status Topics
+- Die Topics `hondae/status/bt_connected` und `hondae/status/auto_reconnect_enabled` zeigen immer den aktuellen Status der App.
+- Sie werden bei jeder MQTT-Publish aktualisiert (alle 10 Sekunden oder bei Werteänderungen).
+- Damit können externe Systeme sehen, was die App gerade macht.
+
+### Filterung von ungültigen Werten
+- Die folgenden Topics werden nur gepublisht, wenn der Wert nicht 0 ist (da 0 bedeutet: Auto sendet keine Daten):
+  - `hondae/status/soc` (0% = Auto aus)
+  - `hondae/status/soh` (0 = Auto aus)
+  - `hondae/status/voltage_v` (0 = Auto aus)
+  - `hondae/status/batt_temp_c` (0 = Auto aus)
+  - `hondae/status/ambient_temp_c` (0 = Auto aus)
+  - `hondae/status/odo_km` (0 = Auto aus)
+  - `hondae/status/aux_bat_v` (0 = ungültig, nur dann publish wenn > 0)
 
 ### Hinweise
 - Die MQTT-URL wird wie bisher im UI eingetragen (`tcp://user:pass@host:port`).
