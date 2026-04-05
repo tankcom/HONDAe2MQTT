@@ -45,7 +45,9 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
+import java.util.LinkedHashSet;
 import java.util.Locale;
+import java.util.Set;
 
 // MQTT Imports
 import org.eclipse.paho.client.mqttv3.MqttClient;
@@ -203,7 +205,8 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private boolean _carConnected = false;
     private boolean _bluetoothConnected = false;
     private byte _newMessage;
-    private long _lastCanMessageEpoch = 0;
+    private volatile long _lastCanMessageEpoch = 0;
+    private volatile String _lastCanFieldsCsv = "";
     private long _btConnectedSinceEpoch = 0;
     private volatile int _pollFastSeconds = CAN_BUS_SCAN_INTERVALL / 1000;
     private volatile int _pollMidSeconds = (CAN_BUS_SCAN_INTERVALL / 1000) * 7;
@@ -670,6 +673,14 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                     _lastPublishedElevation = _elevation;
                 }
                 publishMqttTopic("meta/timestamp", String.valueOf(_epoch));
+                if (_lastCanMessageEpoch > 0) {
+                    long secondsSinceLastCan = Math.max(0, _epoch - _lastCanMessageEpoch);
+                    publishMqttTopic("meta/last_can_message", String.valueOf(_lastCanMessageEpoch));
+                    publishMqttTopic("meta/last_can_message_ago_seconds", String.valueOf(secondsSinceLastCan));
+                }
+                if (!TextUtils.isEmpty(_lastCanFieldsCsv)) {
+                    publishMqttTopic("meta/last_can_fields_csv", _lastCanFieldsCsv);
+                }
                 
                 // Publish responsive status topics
                 publishMqttTopic("status/bt_connected", String.valueOf(_bluetoothConnected));
@@ -719,6 +730,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                                 parseVIN(message);
                                 setText(_vinText, _vin);
                                 _carConnected = true;
+                                _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
                                 _viewModel.setNewMessageProcessed();
                                 break;
                             } else if (_viewModel.isNewMessage()) {
@@ -825,6 +837,8 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
     }
 
     private void loopMessagesToVariables() throws InterruptedException {
+        Set<String> fieldsInLatestCycle = new LinkedHashSet<>();
+
         for (String command : _loopCommands) {
             if (!_loopRunning) break; // Exit loop immediately if stopped
 
@@ -841,6 +855,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                             _ambientTemp = Integer.valueOf(message.substring(42, 44), 16).byteValue();
                             _newMessage++;
                             _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
+                            fieldsInLatestCycle.add("AmbientTemp");
                         }
                     } else if (messageID.equals(SOH_ID)) {
                         if (message.length() >= 285) {
@@ -850,6 +865,10 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                             _power = Math.round(_amp * _volt / 1000.0 * 10.0) / 10.0;
                             _newMessage++;
                             _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
+                            fieldsInLatestCycle.add("SoH");
+                            fieldsInLatestCycle.add("Amp");
+                            fieldsInLatestCycle.add("Volt");
+                            fieldsInLatestCycle.add("Power");
                         }
                     } else if (messageID.equals(SOC_ID)) {
                         if (message.length() >= 280) {
@@ -870,17 +889,23 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                             }
                             _newMessage++;
                             _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
+                            fieldsInLatestCycle.add("SoC");
+                            fieldsInLatestCycle.add("SoCMin");
+                            fieldsInLatestCycle.add("SoCMax");
+                            fieldsInLatestCycle.add("ChargingMode");
                         }
                     } else if (messageID.equals(BATTEMP_ID)) {
                         if (message.length() >= 415) {
                             _batTemp = Integer.valueOf(message.substring(410, 414), 16).shortValue() / 10.0;
                             _newMessage++;
                             _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
+                            fieldsInLatestCycle.add("BatteryTemp");
                         }
                     } else if (messageID.equals(ODO_ID)) {
                         if (message.length() >= 26) {
                             _odo = Integer.parseInt(message.substring(18, 26), 16);
                             _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
+                            fieldsInLatestCycle.add("Odo");
                             if (_lastOdo < _odo) {
                                 _lastOdo = _odo;
                                 _socHistory[_socHistoryPosition] = _soc;
@@ -911,6 +936,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                         setText(_auxBatText, message);
                         // Count 12V message for publishing
                         _newMessage++;
+                        fieldsInLatestCycle.add("12VBat");
                         // Immediately publish 12V value to MQTT
                         if (_mqttRunning) {
                             new Thread(() -> {
@@ -928,6 +954,10 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             if (command.length() <= 7) {
                 Thread.sleep(WAIT_TIME_BETWEEN_COMMAND_SENDS_MS);
             }
+        }
+
+        if (!fieldsInLatestCycle.isEmpty()) {
+            _lastCanFieldsCsv = TextUtils.join(",", fieldsInLatestCycle);
         }
     }
 
@@ -1085,6 +1115,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             publishHADiscoverySensor(nodeId, "charging_mode", "Charging Mode", "", "mdi:plug");
             publishHADiscoverySensor(nodeId, "last_can_message", "Last CAN Message", "", "mdi:clock");
             publishHADiscoverySensor(nodeId, "last_can_message_ago_seconds", "Last CAN Seconds Ago", "s", "mdi:clock-outline");
+            publishHADiscoverySensor(nodeId, "last_can_fields_csv", "Last CAN Fields CSV", "", "mdi:format-list-bulleted");
             publishHADiscoverySensor(nodeId, "bt_connected", "BT Connected", "", "mdi:bluetooth");
 
                 // Writable entities (state + command)

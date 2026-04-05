@@ -41,6 +41,7 @@ A WIP Android App to read Real-Time-Data off of the Honda e via OBD2 ([thanks to
 	- `hondae/heartbeat/timestamp` (Unix-Timestamp der Heartbeat)
 	- `hondae/meta/last_can_message` (Unix-Timestamp der letzten erfolgreichen CAN-Nachricht)
 	- `hondae/meta/last_can_message_ago_seconds` (Sekunden seit der letzten CAN-Nachricht)
+	- `hondae/meta/last_can_fields_csv` (CSV-Liste der zuletzt in der CAN-Antwort enthaltenen Felder, z. B. `SoH,SoC,12VBat,BatteryTemp`)
 	- `hondae/status/bt_connected` (true/false - aktueller Verbindungsstatus mit Auto)
 	- `hondae/status/auto_reconnect_enabled` (true/false - aktueller Toggle-Status für Auto-Reconnect)
 	- `hondae/status/poll_fast_s` (aktueller Fast-Poll-Wert in Sekunden)
