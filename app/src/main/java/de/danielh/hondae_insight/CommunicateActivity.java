@@ -18,6 +18,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import android.view.KeyEvent;
 import android.view.MenuItem;
 import android.view.View;
@@ -195,6 +196,8 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private ScheduledExecutorService _heartbeatScheduler;
     private ScheduledFuture<?> _heartbeatTask;
     private long _lastHeartbeatEpoch = 0;
+    // MQTT reconnect guard to avoid spawning multiple concurrent reconnect attempts
+    private final AtomicBoolean _mqttReconnectInProgress = new AtomicBoolean(false);
 
     NotificationCompat.Builder _notificationBuilder;
     NotificationManagerCompat _notificationManagerCompat;
@@ -537,6 +540,11 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 _mqttClient.setCallback(new MqttCallbackExtended() {
                     @Override
                     public void connectComplete(boolean reconnect, String serverURI) {
+                        // Clear reconnect-in-progress flag — we're connected now
+                        try {
+                            _mqttReconnectInProgress.set(false);
+                        } catch (Exception ignored) {}
+
                         subscribeCommandTopics();
                         // Reset discovery flag so it gets re-published on reconnect
                         _discoveryPublished = false;
@@ -546,7 +554,31 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
 
                     @Override
                     public void connectionLost(Throwable cause) {
+                        // Indicate disconnected state immediately
                         setText(_apiStatusText, "🔴");
+
+                        // If MQTT is enabled, try to reconnect in background with backoff.
+                        if (_mqttRunning && !_mqttReconnectInProgress.getAndSet(true)) {
+                            new Thread(() -> {
+                                int delaySec = 2;
+                                while (_mqttRunning && (_mqttClient == null || !_mqttClient.isConnected())) {
+                                    try {
+                                        Thread.sleep(delaySec * 1000L);
+                                        // Attempt reconnect (connectToMqtt is safe to call repeatedly)
+                                        connectToMqtt();
+                                        if (_mqttClient != null && _mqttClient.isConnected()) break;
+                                        // Exponential backoff up to 60s
+                                        delaySec = Math.min(60, delaySec * 2);
+                                    } catch (InterruptedException ie) {
+                                        break; // stop on interruption
+                                    } catch (Exception e) {
+                                        // swallow and retry with backoff
+                                        delaySec = Math.min(60, delaySec * 2);
+                                    }
+                                }
+                                _mqttReconnectInProgress.set(false);
+                            }).start();
+                        }
                     }
 
                     @Override

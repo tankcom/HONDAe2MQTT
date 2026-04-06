@@ -56,3 +56,4 @@ release/
 # Keystore
 keystore/
 /app/src/main/java/de/danielh/hondae_insight/IternioApiKeyStore.java
+/homeassistant integration
