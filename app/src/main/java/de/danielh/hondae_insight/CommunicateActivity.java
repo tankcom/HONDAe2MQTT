@@ -350,7 +350,18 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
         }
 
         checkExternalMedia();
-        
+
+        // Auto-connect via BT if auto-reconnect is enabled
+        try {
+            if (_viewModel != null && _viewModel.isAutoReconnectEnabled() && _connectSwitch != null) {
+                _mainHandler.post(() -> {
+                    if (!_connectSwitch.isChecked()) {
+                        _connectSwitch.setChecked(true);
+                    }
+                });
+            }
+        } catch (Exception ignored) { }
+
         // Connect to MQTT immediately on startup
         new Thread(this::connectToMqtt).start();
     }

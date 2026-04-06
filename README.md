@@ -1,120 +1,104 @@
-# HONDAeInsight going HONDAe2MQTT
+# HONDAe2MQTT
 
-A WIP Android App to read Real-Time-Data off of the Honda e via OBD2 ([thanks to the work of DanielH1987](https://github.com/DanielH1987/HONDAeInsight)) and publish it via MQTT.
+Android app that reads real-time data from a Honda e via OBD-II over Bluetooth and publishes sensor values to an MQTT broker. The app also publishes Home Assistant discovery messages and writes CSV logs to external storage.
 
-## Neue Funktionen (2026)
+## Overview
 
-### Verbesserte Bluetooth-Verbindung
-- Die App trennt die Bluetooth-Verbindung nicht mehr, wenn nur die 12V-Batterie erkannt wird. Die Verbindung bleibt permanent bestehen, solange sie nicht manuell getrennt wird.
-- Automatisches Wiederverbinden kann über einen neuen UI-Toggle ("Bluetooth Auto Reconnect") aktiviert/deaktiviert werden.
+- Connects to a Bluetooth OBD-II adapter (classic Bluetooth, not BLE) and queries the car's CAN bus for live values.
+- Publishes selected sensor values to MQTT topics under the `hondae` topic hierarchy.
+- Publishes Home Assistant discovery messages (retained, QoS 1) so sensors are automatically discovered.
+- Publishes a heartbeat every 10 seconds and only re-publishes sensor topics when values change to reduce broker load.
+- Writes a CSV log file to external storage when a vehicle session is active.
 
-### MQTT-Steuerung
-- Die App kann per MQTT-Topic ferngesteuert werden:
-	- `hondae/cmd/connect` (Payload: `on`, `true`, `1`, `connect`, `enable` → Verbindung aufbauen; `off`, `false`, `0`, `disconnect`, `disable` → Verbindung trennen)
-	- `hondae/cmd/auto_reconnect` (Payload: analog wie oben; steuert den Auto-Reconnect-Toggle)
-	- `hondae/cmd/poll_fast_s` (Payload: Integer-Sekunden für Poll-Frequenz bis 3 Minuten nach letztem CAN-Datenpunkt)
-	- `hondae/cmd/poll_mid_s` (Payload: Integer-Sekunden für Poll-Frequenz zwischen 3 und 30 Minuten)
-	- `hondae/cmd/poll_slow_s` (Payload: Integer-Sekunden für Poll-Frequenz ab 30 Minuten)
-- Die App hört automatisch auf diese Topics und setzt die Verbindung/Toggles entsprechend.
+## Sensor data published
 
-### MQTT Topic-Struktur
-- Sensorwerte werden jetzt auf **einzelnen Topics** veröffentlicht (statt als JSON in einem Topic):
+The app publishes individual sensor topics (examples):
 
-	- `hondae/status/soc` (State of Charge)
-	- `hondae/status/soc_min` (Min SoC)
-	- `hondae/status/soc_max` (Max SoC)
-	- `hondae/status/soc_delta` (SoC Delta)
-	- `hondae/status/soh` (State of Health)
-	- `hondae/status/power_kw`
-	- `hondae/status/current_a`
-	- `hondae/status/voltage_v`
-	- `hondae/status/batt_temp_c`
-	- `hondae/status/ambient_temp_c`
-	- `hondae/status/is_charging`
-	- `hondae/status/charging_mode`
-	- `hondae/status/speed_kmh`
-	- `hondae/status/odo_km`
-	- `hondae/status/aux_bat_v` (auch wenn Auto aus ist)
-	- `hondae/gps/lat`, `hondae/gps/lon`, `hondae/gps/elevation_m`
-	- `hondae/meta/timestamp`
-	- `hondae/heartbeat/status` (publiziert `online` alle 10 Sekunden)
-	- `hondae/heartbeat/timestamp` (Unix-Timestamp der Heartbeat)
-	- `hondae/meta/last_can_message` (Unix-Timestamp der letzten erfolgreichen CAN-Nachricht)
-	- `hondae/meta/last_can_message_ago_seconds` (Sekunden seit der letzten CAN-Nachricht)
-	- `hondae/meta/last_can_fields_csv` (CSV-Liste der zuletzt in der CAN-Antwort enthaltenen Felder, z. B. `SoH,SoC,12VBat,BatteryTemp`)
-	- `hondae/status/bt_connected` (true/false - aktueller Verbindungsstatus mit Auto)
-	- `hondae/status/auto_reconnect_enabled` (true/false - aktueller Toggle-Status für Auto-Reconnect)
-	- `hondae/status/poll_fast_s` (aktueller Fast-Poll-Wert in Sekunden)
-	- `hondae/status/poll_mid_s` (aktueller Mid-Poll-Wert in Sekunden)
-	- `hondae/status/poll_slow_s` (aktueller Slow-Poll-Wert in Sekunden)
+- `hondae/status/soc` — State of Charge (dash display)
+- `hondae/status/soc_min` — SoC (min)
+- `hondae/status/soc_max` — SoC (max)
+- `hondae/status/soc_delta` — SoC delta (max - min)
+- `hondae/status/soh` — State of Health
+- `hondae/status/power_kw` — Instantaneous power in kW
+- `hondae/status/current_a` — Current in A
+- `hondae/status/voltage_v` — Pack voltage in V
+- `hondae/status/batt_temp_c` — Battery temperature in °C
+- `hondae/status/ambient_temp_c` — Ambient temperature in °C
+- `hondae/status/is_charging` — Boolean flag if charging
+- `hondae/status/charging_mode` — Charging connection type (AC / DC / NC)
+- `hondae/status/speed_kmh` — Speed in km/h
+- `hondae/status/odo_km` — Odometer in km
+- `hondae/status/aux_bat_v` — 12V auxiliary battery voltage
+- `hondae/gps/lat` — GPS latitude
+- `hondae/gps/lon` — GPS longitude
+- `hondae/gps/elevation_m` — GPS elevation (meters)
+- `hondae/meta/timestamp` — Unix timestamp of the data
+- `hondae/meta/last_can_message` — Unix timestamp of the last successful CAN response
+- `hondae/meta/last_can_message_ago_seconds` — Seconds since the last CAN message
+- `hondae/meta/last_can_fields_csv` — CSV list of fields present in the last CAN response
+- `hondae/heartbeat/status` — Heartbeat status (`online`) published periodically
+- `hondae/heartbeat/timestamp` — Heartbeat timestamp
+- `hondae/status/bt_connected` — Boolean: app connected to the car via Bluetooth
+- `hondae/status/auto_reconnect_enabled` — Boolean: Bluetooth auto-reconnect toggle state
+- `hondae/status/poll_fast_s`, `hondae/status/poll_mid_s`, `hondae/status/poll_slow_s` — current poll intervals in seconds
 
-### Heartbeat-Mechanismus
-- Die App publiziert automatisch alle 10 Sekunden einen Heartbeat auf `hondae/heartbeat/status` mit dem Wert `online`.
-- Dies funktioniert auch, wenn das Auto aus ist (12V ist verfügbar).
-- Der Heartbeat triggert auch eine MQTT-Publish aller aktuellen Sensordaten (nur wenn sich Werte geändert haben).
-- Damit kann man zuverlässig prüfen, ob die App noch mit dem MQTT-Broker verbunden und aktiv ist.
+## Control topics (MQTT)
 
-### Home Assistant Auto Discovery
-- Die App publiziert beim MQTT-Connect automatisch MQTT Discovery-Messages für alle Sensoren.
-- Home Assistant erkennt die Sensoren sofort und erstellt automatisch Entities.
-- Die Sensoren sind im Device "Honda e Insight" organisiert mit eindeutiger Identifikation.
-- Discovery-Messages sind retained (QoS 1) für zuverlässige Erkennung.
-- Schreibbare Entitäten sind korrekt als bidirektionale HA-Controls angelegt:
-	- `switch`: Connect, Auto Reconnect (`command_topic` unter `hondae/cmd/*`, `state_topic` unter `hondae/status/*`)
-	- `number`: Poll Fast/Mid/Slow (`command_topic` unter `hondae/cmd/*`, `state_topic` unter `hondae/status/*`)
+The app listens for command topics to control connection and polling intervals:
 
-### Optimiertes MQTT Publishing
-- Sensoren-Topics werden nur aktualisiert, wenn sich der Wert tatsächlich ändert.
-- Verhindert unnötige MQTT-Messages und reduziert Traffic zum Broker.
-- Beispiel: Wenn SoC unverändert bleibt, wird das Topic nicht erneut published.
-- Als Resultat: minimale Last auf MQTT-Broker und Speicherverbrauch.
+- `hondae/cmd/connect` — payloads accepted: `1`, `0`, `true`, `false`, `on`, `off`, `connect`, `disconnect`, `enable`, `disable`
+- `hondae/cmd/auto_reconnect` — same payloads as above; controls the auto-reconnect toggle
+- `hondae/cmd/poll_fast_s` — integer seconds (1–3600)
+- `hondae/cmd/poll_mid_s` — integer seconds (1–3600)
+- `hondae/cmd/poll_slow_s` — integer seconds (1–3600)
 
-### Responsive Status Topics
-- Die Topics `hondae/status/bt_connected` und `hondae/status/auto_reconnect_enabled` zeigen immer den aktuellen Status der App.
-- Sie werden bei jeder MQTT-Publish aktualisiert (alle 10 Sekunden oder bei Werteänderungen).
-- Damit können externe Systeme sehen, was die App gerade macht.
+Commands are processed by the app and the corresponding state topics under `hondae/status/*` are updated after changes.
 
-### Filterung von ungültigen Werten
-- Die folgenden Topics werden nur gepublisht, wenn der Wert nicht 0 ist (da 0 bedeutet: Auto sendet keine Daten):
-  - `hondae/status/soc` (0% = Auto aus)
-  - `hondae/status/soh` (0 = Auto aus)
-  - `hondae/status/voltage_v` (0 = Auto aus)
-  - `hondae/status/batt_temp_c` (0 = Auto aus)
-  - `hondae/status/ambient_temp_c` (0 = Auto aus)
-  - `hondae/status/odo_km` (0 = Auto aus)
-  - `hondae/status/aux_bat_v` (0 = ungültig, nur dann publish wenn > 0)
+## Home Assistant discovery
 
-### Hinweise
-- Die MQTT-URL wird wie bisher im UI eingetragen (`tcp://user:pass@host:port`).
-- Der 12V-Wert wird sofort nach Empfang zu MQTT gesendet.
+On MQTT connect the app publishes retained discovery messages for sensors, switches and numbers under `homeassistant/...`. Discovery payloads include `state_topic` and `command_topic` where applicable so Home Assistant can create entities automatically.
 
+## How to enter the MQTT broker and credentials
 
+Open the app's Communicate screen and locate the `MQTT URL` input (the UI also shows a hint like `tcp://user:pass@192.168.1.x:1883`).
 
----
-first tests by repurposing existing functions:
-- csv to be written to local storage
-- API key input field used for broker connection tcp://username:password@IP_ADDRESS:PORT
-- slowing down communication and prolong timeouts for higher reliablity of can-bus comms
-- optimizing UI logics for usability
+Enter the broker address in one of these formats:
 
+- No authentication: `tcp://host:port`  
+- Username only: `tcp://username@host:port`  
+- Username and password: `tcp://username:password@host:port`
 
+Examples:
 
+- `tcp://192.168.1.10:1883`  
+- `tcp://mqttuser@192.168.1.10:1883`  
+- `tcp://mqttuser:secretpassword@mqtt.example.com:1883`
 
-from the original readme:
+Notes:
 
-This App is for testing purposes only! Feel free to add features, fix bugs and create pull requests.
+- Credentials are parsed from the URI only when the URL starts with `tcp://` and contains an `@` symbol. The substring before the `@` is treated as `username[:password]`. If a colon is present in that substring, the part after the colon is used as password.
+- After entering the URL you can press the keyboard's "Done" button (or toggle the `Send Data via MQTT` switch) to save and (re)connect the MQTT client.
 
-You'll need an OBDII-Adapter that has at least 864 bytes message buffer with Bluetooth - not BLE!
-A cheap ELM327-Clone won't work because of the length auf den CAN messages the e sends.
+## Usage
 
-OBDII-Adapter known to be working are:
-- OBDlink MX Bluetooth
-- vLinker FD
-- vLinker MC
-- vLinker BM+
-- vLinker BM
+1. Pair your Bluetooth OBD-II adapter with the Android device (classic Bluetooth, not BLE).  
+2. Open the app, select the paired device and allow the app to connect.  
+3. Enable `Send Data via MQTT` and set the `MQTT URL` as described above.  
+4. Optionally allow `Bluetooth Auto Reconnect` in the UI.  
+5. Sensor values and heartbeat messages will be published to the broker and Home Assistant will discover available entities automatically.
 
-OBDII-Adapter not working:
-- ELM327-Clone
+## CSV logging
 
-Based heavily on https://github.com/harry1453/android-bluetooth-serial example App - Thanks^2!
+When a vehicle session begins the app creates a CSV file on external storage. The CSV header is:
+
+`sysTimeMs,ODO,SoC (dash),SoC (min),SoC (max),SoH,Battemp,Ambienttemp,kW,Amp,Volt,AuxBat,Connection,Charging,Speed,Lat,Lon`
+
+## Requirements and known adapters
+
+- Requires a Bluetooth OBD-II adapter with a large message buffer (the app reads long CAN responses). Classic Bluetooth adapters with at least ~864 bytes buffer are recommended.  
+- Known working adapters: OBDlink MX Bluetooth, vLinker FD, vLinker MC, vLinker BM+, vLinker BM.  
+- ELM327-clone adapters are known **not** to work reliably for the Honda e CAN messages.
+
+## Disclaimer
+
+This app is provided for testing and experimentation. Use at your own risk. Contributions and pull requests are welcome.
