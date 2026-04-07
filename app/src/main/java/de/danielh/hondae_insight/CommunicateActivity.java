@@ -176,6 +176,10 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private byte _newMessage;
     private volatile long _lastCanMessageEpoch = 0;
     private volatile String _lastCanFieldsCsv = "";
+    private volatile String _lastBtDataType = "none";
+    private long _lastCanHeartbeatEpoch = 0;
+
+    private static final SimpleDateFormat ISO_FORMAT = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", Locale.US);
     private long _btConnectedSinceEpoch = 0;
     private volatile int _pollFastSeconds = CAN_BUS_SCAN_INTERVALL / 1000;
     private volatile int _pollMidSeconds = (CAN_BUS_SCAN_INTERVALL / 1000) * 7;
@@ -745,15 +749,16 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                     publishMqttTopic("gps/elevation_m", String.valueOf(_elevation));
                     _lastPublishedElevation = _elevation;
                 }
-                publishMqttTopic("meta/timestamp", String.valueOf(_epoch));
+                publishMqttTopic("meta/timestamp", formatIsoTimestamp(_sysTimeMs));
                 if (_lastCanMessageEpoch > 0) {
                     long secondsSinceLastCan = Math.max(0, _epoch - _lastCanMessageEpoch);
-                    publishMqttTopic("meta/last_can_message", String.valueOf(_lastCanMessageEpoch));
+                    publishMqttTopic("meta/last_can_message", formatIsoTimestamp(_lastCanMessageEpoch * 1000L));
                     publishMqttTopic("meta/last_can_message_ago_seconds", String.valueOf(secondsSinceLastCan));
                 }
                 if (!TextUtils.isEmpty(_lastCanFieldsCsv)) {
                     publishMqttTopic("meta/last_can_fields_csv", _lastCanFieldsCsv);
                 }
+                publishMqttTopic("status/last_bt_data_type", _lastBtDataType);
                 
                 // Publish responsive status topics
                 publishMqttTopic("status/bt_connected", String.valueOf(_bluetoothConnected));
@@ -1051,6 +1056,12 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
 
         if (!fieldsInLatestCycle.isEmpty()) {
             _lastCanFieldsCsv = TextUtils.join(",", fieldsInLatestCycle);
+            // Determine data type: if only 12V battery, report "12v_only", otherwise "full_canbus"
+            if (fieldsInLatestCycle.size() == 1 && fieldsInLatestCycle.contains("12VBat")) {
+                _lastBtDataType = "12v_only";
+            } else {
+                _lastBtDataType = "full_canbus";
+            }
         }
     }
 
@@ -1269,6 +1280,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             publishHADiscoverySensor(nodeId, "last_can_fields_csv", "Last CAN Fields CSV", "", "mdi:format-list-bulleted");
             publishHADiscoverySensor(nodeId, "bt_connected", "BT Connected", "", "mdi:bluetooth");
             publishHADiscoverySensor(nodeId, "bt_rssi_dbm", "BT RSSI", "dBm", "mdi:signal");
+            publishHADiscoverySensor(nodeId, "last_bt_data_type", "Last BT Data Type", "", "mdi:bluetooth-transfer");
 
             // GPS topics
             publishHADiscoverySensor(nodeId, "gps_lat", "GPS Latitude", "", "mdi:latitude", MQTT_BASE_TOPIC + "/gps/lat");
@@ -1281,6 +1293,8 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             // Heartbeat topics
             publishHADiscoverySensor(nodeId, "heartbeat_status", "Heartbeat Status", "", "mdi:heart-pulse", MQTT_BASE_TOPIC + "/heartbeat/status");
             publishHADiscoverySensor(nodeId, "heartbeat_timestamp", "Heartbeat Timestamp", "", "mdi:clock-check", MQTT_BASE_TOPIC + "/heartbeat/timestamp");
+            publishHADiscoverySensor(nodeId, "heartbeat_can_status", "CAN Heartbeat Status", "", "mdi:car-connected", MQTT_BASE_TOPIC + "/heartbeat/can_status");
+            publishHADiscoverySensor(nodeId, "heartbeat_can_timestamp", "CAN Heartbeat Timestamp", "", "mdi:clock-check-outline", MQTT_BASE_TOPIC + "/heartbeat/can_timestamp");
 
                 // Writable entities (state + command)
                 publishHADiscoverySwitch(
@@ -1500,23 +1514,33 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         _heartbeatTask = _heartbeatScheduler.scheduleAtFixedRate(() -> {
             try {
                 _epoch = System.currentTimeMillis() / 1000;
+                String isoNow = formatIsoTimestamp(System.currentTimeMillis());
                 
-                // Publish heartbeat
+                // Publish app heartbeat (always, every ~10s)
                 if (_mqttRunning && _lastHeartbeatEpoch + 9 < _epoch) {
                     _lastHeartbeatEpoch = _epoch;
                     publishMqttTopic("heartbeat/status", "online");
-                    publishMqttTopic("heartbeat/timestamp", String.valueOf(_epoch));
+                    publishMqttTopic("heartbeat/timestamp", isoNow);
                     
                     // Publish last successful CAN message timestamp
                     if (_lastCanMessageEpoch > 0) {
                         long secondsSinceLastCan = _epoch - _lastCanMessageEpoch;
-                        publishMqttTopic("meta/last_can_message", String.valueOf(_lastCanMessageEpoch));
+                        publishMqttTopic("meta/last_can_message", formatIsoTimestamp(_lastCanMessageEpoch * 1000L));
                         publishMqttTopic("meta/last_can_message_ago_seconds", String.valueOf(secondsSinceLastCan));
                     }
+                    publishMqttTopic("status/last_bt_data_type", _lastBtDataType);
                     
                     // Also publish all current values
                     publishMqttMessage();
                     setText(_apiStatusText, "🔵");
+                }
+
+                // CAN heartbeat: only fires when new CAN data arrived since last beat
+                if (_mqttRunning && _lastCanMessageEpoch > _lastCanHeartbeatEpoch) {
+                    _lastCanHeartbeatEpoch = _lastCanMessageEpoch;
+                    publishMqttTopic("heartbeat/can_status", "data_received");
+                    publishMqttTopic("heartbeat/can_timestamp", formatIsoTimestamp(_lastCanMessageEpoch * 1000L));
+                    publishMqttTopic("status/last_bt_data_type", _lastBtDataType);
                 }
             } catch (Exception e) {
                 // Silently handle exceptions in heartbeat
@@ -1572,6 +1596,10 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
 
     private String getBtRssiPayload() {
         return _btRssiDbm == Integer.MIN_VALUE ? "-127" : String.valueOf(_btRssiDbm);
+    }
+
+    private String formatIsoTimestamp(long millis) {
+        return ISO_FORMAT.format(new Date(millis));
     }
 
     private void parseVIN(String message) {
