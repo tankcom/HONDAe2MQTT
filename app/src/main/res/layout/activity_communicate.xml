@@ -355,6 +355,29 @@
                         <TextView android:id="@+id/communicate_speed" android:text="" android:textColor="#888888" android:layout_marginStart="8dp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
                     </LinearLayout>
 
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:layout_marginBottom="12dp">
+
+                        <TextView
+                            android:text="@string/bt_rssi_label"
+                            android:textColor="#B0B0B0"
+                            android:layout_weight="1"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"/>
+
+                        <TextView
+                            android:id="@+id/communicate_bt_rssi"
+                            android:text="@string/bt_rssi_unknown"
+                            android:textColor="#FFFFFF"
+                            android:textStyle="bold"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"/>
+                    </LinearLayout>
+
                     <EditText
                         android:id="@+id/communicate_mqtt_url"
                         android:layout_width="match_parent"

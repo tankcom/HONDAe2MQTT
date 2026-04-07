@@ -2,12 +2,18 @@ package de.danielh.hondae_insight;
 
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
@@ -67,6 +73,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     public static final int PARK_STAGE_2_SECONDS = 30 * 60;
     public static final int BT_DISCONNECT_DEBOUNCE_SECONDS = 12;
     public static final int CAN_SILENCE_FORCE_RECONNECT_SECONDS = 120;
+    public static final int BT_RSSI_SCAN_INTERVAL_SECONDS = 30;
 
     // CAN Command IDs
     public static final String VIN_ID = "1862F190";
@@ -118,7 +125,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     // UI Elements
     private TextView _connectionText, _vinText, _messageText, _socMinText, _socMaxText, _socDeltaText,
             _socDashText, _batTempText, _batTempDeltaText, _ambientTempText, _sohText, _kwText, _ampText, _voltText, _auxBatText, _odoText,
-            _rangeText, _chargingText, _speedText, _gpsStatusText, _apiStatusText;
+            _rangeText, _chargingText, _speedText, _gpsStatusText, _apiStatusText, _btRssiText;
     
     private EditText _mqttUrlText;
     private Switch _mqttSwitch;
@@ -153,6 +160,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private double _lastPublishedAmp = -1, _lastPublishedVolt = -1, _lastPublishedAuxBat = -1;
     private byte _lastPublishedAmbientTemp = Byte.MIN_VALUE;
     private int _lastPublishedOdo = Integer.MIN_VALUE;
+    private int _lastPublishedBtRssi = Integer.MIN_VALUE;
     private String _lastPublishedLat = null, _lastPublishedLon = null;
     private double _lastPublishedElevation = -1;
     private ChargingConnection _lastPublishedChargingConnection = null;
@@ -177,6 +185,43 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private volatile int _pollFastSeconds = CAN_BUS_SCAN_INTERVALL / 1000;
     private volatile int _pollMidSeconds = (CAN_BUS_SCAN_INTERVALL / 1000) * 7;
     private volatile int _pollSlowSeconds = (CAN_BUS_SCAN_INTERVALL / 1000) * 30;
+    private volatile int _btRssiDbm = Integer.MIN_VALUE;
+    private String _targetBtMac;
+    private boolean _isReconnectFlow = false;
+    private boolean _btReceiverRegistered = false;
+    private final Runnable _btRssiScanRunnable = new Runnable() {
+        @Override
+        public void run() {
+            scanBluetoothRssi();
+            _mainHandler.postDelayed(this, BT_RSSI_SCAN_INTERVAL_SECONDS * 1000L);
+        }
+    };
+    private final BroadcastReceiver _btScanReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null || intent.getAction() == null) {
+                return;
+            }
+
+            if (BluetoothDevice.ACTION_FOUND.equals(intent.getAction())) {
+                BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if (device == null || _targetBtMac == null) {
+                    return;
+                }
+                String foundMac = device.getAddress();
+                if (foundMac == null || !_targetBtMac.equalsIgnoreCase(foundMac)) {
+                    return;
+                }
+
+                short rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE);
+                if (rssi != Short.MIN_VALUE) {
+                    _btRssiDbm = rssi;
+                    updateBtRssiText();
+                    publishControlStatusAsync();
+                }
+            }
+        }
+    };
 
     private final Handler _mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable _reconnectRunnable = () -> {
@@ -227,6 +272,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
             deviceName = prefs.getString("saved_device_name", "Unknown Device");
             deviceMac = prefs.getString("saved_device_mac", null);
         }
+        _targetBtMac = deviceMac;
 
         // Updated ViewModel init
         _viewModel = new ViewModelProvider(this).get(CommunicateViewModel.class);
@@ -273,6 +319,8 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
         _odoText = findViewById(R.id.communicate_odo);
         _rangeText = findViewById(R.id.communicate_range);
         _apiStatusText = findViewById(R.id.communicate_api_status);
+        _btRssiText = findViewById(R.id.communicate_bt_rssi);
+        updateBtRssiText();
 
         // MQTT UI Setup
         _mqttUrlText = findViewById(R.id.communicate_mqtt_url);
@@ -332,6 +380,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
 
         _viewModel.getConnectionStatus().observe(this, this::onConnectionStatus);
         _viewModel.getDeviceName().observe(this, name -> setTitle(getString(R.string.device_name_format, name)));
+        startBtRssiScanner();
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
@@ -339,6 +388,16 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
         try {
             if (ContextCompat.checkSelfPermission(getApplicationContext(), android.Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
                 ActivityCompat.requestPermissions(this, new String[]{android.Manifest.permission.ACCESS_FINE_LOCATION}, 101);
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                boolean missingScan = ContextCompat.checkSelfPermission(getApplicationContext(), android.Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED;
+                boolean missingConnect = ContextCompat.checkSelfPermission(getApplicationContext(), android.Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED;
+                if (missingScan || missingConnect) {
+                    ActivityCompat.requestPermissions(this, new String[]{
+                            android.Manifest.permission.BLUETOOTH_SCAN,
+                            android.Manifest.permission.BLUETOOTH_CONNECT
+                    }, 102);
+                }
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -386,6 +445,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
 
         switch (connectionStatus) {
             case CONNECTED:
+                _isReconnectFlow = false;
                 _connectionText.setText(R.string.status_connected);
                 _connectSwitch.setChecked(true);
                 _connectSwitch.setEnabled(true);
@@ -403,16 +463,19 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 break;
 
             case CONNECTING:
-                _connectionText.setText(R.string.status_connecting);
+                _bluetoothConnected = false;
+                _connectionText.setText(_isReconnectFlow ? R.string.status_reconnecting : R.string.status_connecting);
                 _connectSwitch.setChecked(true);
                 _connectSwitch.setEnabled(true); 
                 _viewModel.setRetry(_viewModel.isAutoReconnectEnabled());
+                publishControlStatusAsync();
                 break;
 
             case DISCONNECTED:
+                _isReconnectFlow = false;
                 _loopRunning = false; // Stop loop
                 _connectionText.setText(R.string.status_disconnected);
-                _connectSwitch.setChecked(false);
+                _connectSwitch.setChecked(_viewModel.isAutoReconnectEnabled() && _viewModel.isRetry());
                 _connectSwitch.setEnabled(true);
                 closeLogFile();
                 _mainHandler.removeCallbacks(_reconnectRunnable);
@@ -427,8 +490,12 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 break;
 
             case RETRY:
-                if (_viewModel.isAutoReconnectEnabled() && _connectSwitch.isChecked()) {
+                _isReconnectFlow = true;
+                _bluetoothConnected = false;
+                publishControlStatusAsync();
+                if (_viewModel.isAutoReconnectEnabled()) {
                     _connectionText.setText(R.string.status_reconnecting);
+                    _connectSwitch.setChecked(true);
                     _mainHandler.removeCallbacks(_reconnectRunnable);
                     _mainHandler.postDelayed(_reconnectRunnable, 3000);
                 } else {
@@ -461,6 +528,16 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         _mqttRunning = false;
         _mainHandler.removeCallbacks(_reconnectRunnable);
         _mainHandler.removeCallbacks(_publishBtDisconnectedRunnable);
+        _mainHandler.removeCallbacks(_btRssiScanRunnable);
+
+        try {
+            if (_btReceiverRegistered) {
+                unregisterReceiver(_btScanReceiver);
+                _btReceiverRegistered = false;
+            }
+        } catch (Exception ignored) {
+        }
+        stopBluetoothDiscovery();
         
         // Stop heartbeat scheduler
         if (_heartbeatTask != null && !_heartbeatTask.isCancelled()) {
@@ -684,6 +761,10 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 if (_lastPublishedChargingConnection != _chargingConnection) {
                     publishMqttTopic("status/charging_mode", _chargingConnection.getName());
                     _lastPublishedChargingConnection = _chargingConnection;
+                }
+                if (_lastPublishedBtRssi != _btRssiDbm) {
+                    publishMqttTopic("status/bt_rssi_dbm", getBtRssiPayload());
+                    _lastPublishedBtRssi = _btRssiDbm;
                 }
                 if (_lastPublishedSpeed != _speed) {
                     publishMqttTopic("status/speed_kmh", String.valueOf(_speed));
@@ -1232,6 +1313,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             publishHADiscoverySensor(nodeId, "last_can_message_ago_seconds", "Last CAN Seconds Ago", "s", "mdi:clock-outline");
             publishHADiscoverySensor(nodeId, "last_can_fields_csv", "Last CAN Fields CSV", "", "mdi:format-list-bulleted");
             publishHADiscoverySensor(nodeId, "bt_connected", "BT Connected", "", "mdi:bluetooth");
+            publishHADiscoverySensor(nodeId, "bt_rssi_dbm", "BT RSSI", "dBm", "mdi:signal");
 
             // GPS topics
             publishHADiscoverySensor(nodeId, "gps_lat", "GPS Latitude", "", "mdi:latitude", MQTT_BASE_TOPIC + "/gps/lat");
@@ -1515,6 +1597,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                     connectToMqtt();
                 }
                 publishMqttTopic("status/bt_connected", String.valueOf(_bluetoothConnected));
+                publishMqttTopic("status/bt_rssi_dbm", getBtRssiPayload());
                 publishMqttTopic("status/auto_reconnect_enabled", String.valueOf(_viewModel.isAutoReconnectEnabled()));
                 publishMqttTopic("status/poll_fast_s", String.valueOf(_pollFastSeconds));
                 publishMqttTopic("status/poll_mid_s", String.valueOf(_pollMidSeconds));
@@ -1522,6 +1605,71 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             } catch (Exception ignored) {
             }
         }).start();
+    }
+
+    private void startBtRssiScanner() {
+        try {
+            if (!_btReceiverRegistered) {
+                IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_FOUND);
+                registerReceiver(_btScanReceiver, filter);
+                _btReceiverRegistered = true;
+            }
+        } catch (Exception ignored) {
+        }
+
+        _mainHandler.removeCallbacks(_btRssiScanRunnable);
+        _mainHandler.post(_btRssiScanRunnable);
+    }
+
+    private void scanBluetoothRssi() {
+        try {
+            if (_targetBtMac == null || _targetBtMac.isEmpty()) {
+                return;
+            }
+            if (!hasBluetoothScanPermission()) {
+                return;
+            }
+
+            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+            if (adapter == null || !adapter.isEnabled()) {
+                return;
+            }
+
+            if (adapter.isDiscovering()) {
+                adapter.cancelDiscovery();
+            }
+            adapter.startDiscovery();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void stopBluetoothDiscovery() {
+        try {
+            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+            if (adapter != null && adapter.isDiscovering()) {
+                adapter.cancelDiscovery();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private boolean hasBluetoothScanPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return true;
+        }
+        return ContextCompat.checkSelfPermission(this, android.Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void updateBtRssiText() {
+        if (_btRssiText == null) {
+            return;
+        }
+        String value = _btRssiDbm == Integer.MIN_VALUE ? getString(R.string.bt_rssi_unknown) : (_btRssiDbm + " dBm");
+        setText(_btRssiText, value);
+    }
+
+    private String getBtRssiPayload() {
+        return _btRssiDbm == Integer.MIN_VALUE ? "-127" : String.valueOf(_btRssiDbm);
     }
 
     private void parseVIN(String message) {
