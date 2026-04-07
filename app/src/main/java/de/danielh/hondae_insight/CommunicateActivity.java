@@ -822,6 +822,8 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                                 _auxBat = Double.parseDouble(message.substring(0, message.length() - 1));
                                 setText(_auxBatText, message);
                                 canSilenceSinceEpoch = System.currentTimeMillis() / 1000;
+                                _lastBtDataType = "12v_only";
+                                _lastCanMessageEpoch = canSilenceSinceEpoch;
                             }
                         }
                     }
