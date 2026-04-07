@@ -2,12 +2,7 @@ package de.danielh.hondae_insight;
 
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
-import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.location.Location;
@@ -188,47 +183,12 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private volatile int _btRssiDbm = Integer.MIN_VALUE;
     private String _targetBtMac;
     private boolean _isReconnectFlow = false;
-    private boolean _btReceiverRegistered = false;
-    private final Runnable _btRssiScanRunnable = new Runnable() {
-        @Override
-        public void run() {
-            if (!_bluetoothConnected && _connectSwitch != null && !_connectSwitch.isChecked() && !_isReconnectFlow) {
-                scanBluetoothRssi();
-            }
-            _mainHandler.postDelayed(this, BT_RSSI_SCAN_INTERVAL_SECONDS * 1000L);
-        }
-    };
-    private final BroadcastReceiver _btScanReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            if (intent == null || intent.getAction() == null) {
-                return;
-            }
-
-            if (BluetoothDevice.ACTION_FOUND.equals(intent.getAction())) {
-                BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-                if (device == null || _targetBtMac == null) {
-                    return;
-                }
-                String foundMac = device.getAddress();
-                if (foundMac == null || !_targetBtMac.equalsIgnoreCase(foundMac)) {
-                    return;
-                }
-
-                short rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE);
-                if (rssi != Short.MIN_VALUE) {
-                    _btRssiDbm = rssi;
-                    updateBtRssiText();
-                    publishControlStatusAsync();
-                }
-            }
-        }
-    };
+    // RSSI is updated passively from ACTION_ACL_CONNECTED / read-back if available.
+    // BluetoothAdapter.startDiscovery() is NOT used — it breaks classic RFCOMM connections.
 
     private final Handler _mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable _reconnectRunnable = () -> {
         if (_viewModel != null && _viewModel.isAutoReconnectEnabled() && _connectSwitch != null && _connectSwitch.isChecked()) {
-            stopBluetoothDiscovery();
             _viewModel.connect();
         }
     };
@@ -383,7 +343,6 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
 
         _viewModel.getConnectionStatus().observe(this, this::onConnectionStatus);
         _viewModel.getDeviceName().observe(this, name -> setTitle(getString(R.string.device_name_format, name)));
-        startBtRssiScanner();
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
@@ -419,9 +378,11 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
         try {
             if (_viewModel != null && _viewModel.isAutoReconnectEnabled() && _connectSwitch != null) {
                 _mainHandler.post(() -> {
-                    if (!_connectSwitch.isChecked()) {
-                        _connectSwitch.setChecked(true);
-                    }
+                    _connectSwitch.setOnCheckedChangeListener(null);
+                    _connectSwitch.setChecked(true);
+                    _connectSwitch.setOnCheckedChangeListener(this::handleConnectionSwitch);
+                    _viewModel.setRetry(true);
+                    _viewModel.connect();
                 });
             }
         } catch (Exception ignored) { }
@@ -432,7 +393,6 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     // --- FIX: Simplified Connection Switch Logic ---
     private void handleConnectionSwitch(CompoundButton buttonView, boolean isChecked) {
         if (isChecked) {
-            stopBluetoothDiscovery();
             _mainHandler.removeCallbacks(_reconnectRunnable);
             _viewModel.setRetry(true);
             _viewModel.connect();
@@ -450,7 +410,6 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         switch (connectionStatus) {
             case CONNECTED:
                 _isReconnectFlow = false;
-                stopBluetoothDiscovery();
                 _connectionText.setText(R.string.status_connected);
                 _connectSwitch.setChecked(true);
                 _connectSwitch.setEnabled(true);
@@ -469,7 +428,6 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
 
             case CONNECTING:
                 _bluetoothConnected = false;
-                stopBluetoothDiscovery();
                 _connectionText.setText(_isReconnectFlow ? R.string.status_reconnecting : R.string.status_connecting);
                 _connectSwitch.setChecked(true);
                 _connectSwitch.setEnabled(true); 
@@ -481,7 +439,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 _isReconnectFlow = false;
                 _loopRunning = false; // Stop loop
                 _connectionText.setText(R.string.status_disconnected);
-                _connectSwitch.setChecked(_viewModel.isAutoReconnectEnabled() && _viewModel.isRetry());
+                _connectSwitch.setChecked(false);
                 _connectSwitch.setEnabled(true);
                 closeLogFile();
                 _mainHandler.removeCallbacks(_reconnectRunnable);
@@ -498,7 +456,6 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             case RETRY:
                 _isReconnectFlow = true;
                 _bluetoothConnected = false;
-                stopBluetoothDiscovery();
                 publishControlStatusAsync();
                 if (_viewModel.isAutoReconnectEnabled()) {
                     _connectionText.setText(R.string.status_reconnecting);
@@ -535,16 +492,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         _mqttRunning = false;
         _mainHandler.removeCallbacks(_reconnectRunnable);
         _mainHandler.removeCallbacks(_publishBtDisconnectedRunnable);
-        _mainHandler.removeCallbacks(_btRssiScanRunnable);
 
-        try {
-            if (_btReceiverRegistered) {
-                unregisterReceiver(_btScanReceiver);
-                _btReceiverRegistered = false;
-            }
-        } catch (Exception ignored) {
-        }
-        stopBluetoothDiscovery();
         
         // Stop heartbeat scheduler
         if (_heartbeatTask != null && !_heartbeatTask.isCancelled()) {
@@ -1614,68 +1562,12 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         }).start();
     }
 
-    private void startBtRssiScanner() {
-        try {
-            if (!_btReceiverRegistered) {
-                IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_FOUND);
-                registerReceiver(_btScanReceiver, filter);
-                _btReceiverRegistered = true;
-            }
-        } catch (Exception ignored) {
-        }
-
-        _mainHandler.removeCallbacks(_btRssiScanRunnable);
-        _mainHandler.post(_btRssiScanRunnable);
-    }
-
-    private void scanBluetoothRssi() {
-        try {
-            if (_targetBtMac == null || _targetBtMac.isEmpty()) {
-                return;
-            }
-            if (!hasBluetoothScanPermission()) {
-                return;
-            }
-
-            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-            if (adapter == null || !adapter.isEnabled()) {
-                return;
-            }
-
-            if (adapter.isDiscovering()) {
-                adapter.cancelDiscovery();
-            }
-            adapter.startDiscovery();
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void stopBluetoothDiscovery() {
-        try {
-            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-            if (adapter != null && adapter.isDiscovering()) {
-                adapter.cancelDiscovery();
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    private boolean hasBluetoothScanPermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            return true;
-        }
-        return ContextCompat.checkSelfPermission(this, android.Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED;
-    }
-
     private void updateBtRssiText() {
         if (_btRssiText == null) {
             return;
         }
         String value = _btRssiDbm == Integer.MIN_VALUE ? getString(R.string.bt_rssi_unknown) : (_btRssiDbm + " dBm");
         setText(_btRssiText, value);
-        if (_messageText != null) {
-            setText(_messageText, "BT RSSI: " + value);
-        }
     }
 
     private String getBtRssiPayload() {
