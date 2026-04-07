@@ -199,6 +199,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private long _lastHeartbeatEpoch = 0;
     // MQTT reconnect guard to avoid spawning multiple concurrent reconnect attempts
     private final AtomicBoolean _mqttReconnectInProgress = new AtomicBoolean(false);
+    private final Object _mqttLock = new Object();
 
     NotificationCompat.Builder _notificationBuilder;
     NotificationManagerCompat _notificationManagerCompat;
@@ -363,8 +364,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
             }
         } catch (Exception ignored) { }
 
-        // Connect to MQTT immediately on startup
-        new Thread(this::connectToMqtt).start();
+        // MQTT startup is handled by the switch state callback.
     }
 
     // --- FIX: Simplified Connection Switch Logic ---
@@ -458,6 +458,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
     protected void onDestroy() {
         // --- FIX: Stop loop to prevent phantom threads ---
         _loopRunning = false; 
+        _mqttRunning = false;
         _mainHandler.removeCallbacks(_reconnectRunnable);
         _mainHandler.removeCallbacks(_publishBtDisconnectedRunnable);
         
@@ -470,8 +471,10 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         }
 
         try {
-            if (_mqttClient != null && _mqttClient.isConnected()) {
-                _mqttClient.disconnect();
+            synchronized (_mqttLock) {
+                if (_mqttClient != null && _mqttClient.isConnected()) {
+                    _mqttClient.disconnect();
+                }
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -484,12 +487,15 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
     private void restartMqtt() {
         new Thread(() -> {
             try {
-                if (_mqttClient != null) {
-                    try {
-                        if (_mqttClient.isConnected()) _mqttClient.disconnect();
-                    } catch (Exception e) {}
-                    try { _mqttClient.close(); } catch (Exception e) {}
-                    _mqttClient = null; // Force recreation
+                _mqttReconnectInProgress.set(false);
+                synchronized (_mqttLock) {
+                    if (_mqttClient != null) {
+                        try {
+                            if (_mqttClient.isConnected()) _mqttClient.disconnect();
+                        } catch (Exception e) {}
+                        try { _mqttClient.close(); } catch (Exception e) {}
+                        _mqttClient = null; // Force recreation
+                    }
                 }
                 connectToMqtt();
             } catch (Exception e) {
@@ -507,109 +513,116 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
 
     private void connectToMqtt() {
         try {
-            if (_mqttClient == null) {
-                String rawInput = _preferences.getString(PREFS_KEY_MQTT_URL, "").trim();
-                String brokerUrl = rawInput;
-                String username = null;
-                String password = null;
-
-                if (rawInput.contains("@") && rawInput.startsWith("tcp://")) {
-                    try {
-                        String withoutScheme = rawInput.substring(6);
-                        int atIndex = withoutScheme.lastIndexOf("@");
-                        if (atIndex != -1) {
-                            String userPass = withoutScheme.substring(0, atIndex);
-                            String hostPort = withoutScheme.substring(atIndex + 1);
-                            brokerUrl = "tcp://" + hostPort;
-                            int colonIndex = userPass.indexOf(":");
-                            if (colonIndex != -1) {
-                                username = userPass.substring(0, colonIndex);
-                                password = userPass.substring(colonIndex + 1);
-                            } else {
-                                username = userPass;
-                            }
-                        }
-                    } catch (Exception e) {
-                        brokerUrl = rawInput;
-                    }
-                }
-
-                _mqttConnOpts = new MqttConnectOptions();
-                _mqttConnOpts.setCleanSession(true);
-                _mqttConnOpts.setConnectionTimeout(10); 
-                _mqttConnOpts.setKeepAliveInterval(60); 
-                _mqttConnOpts.setAutomaticReconnect(true);
-                
-                if (username != null && !username.isEmpty()) {
-                    _mqttConnOpts.setUserName(username);
-                    if (password != null) {
-                        _mqttConnOpts.setPassword(password.toCharArray());
-                    }
-                }
-
-                String clientId = "HondaE_Android_" + System.currentTimeMillis();
-                _mqttClient = new MqttClient(brokerUrl, clientId, new MemoryPersistence());
-                _mqttClient.setCallback(new MqttCallbackExtended() {
-                    @Override
-                    public void connectComplete(boolean reconnect, String serverURI) {
-                        // Clear reconnect-in-progress flag — we're connected now
-                        try {
-                            _mqttReconnectInProgress.set(false);
-                        } catch (Exception ignored) {}
-
-                        subscribeCommandTopics();
-                        // Reset discovery flag so it gets re-published on reconnect
-                        _discoveryPublished = false;
-                        // Re-publish discovery messages after connection/reconnection
-                        publishHomeAssistantDiscovery();
-                    }
-
-                    @Override
-                    public void connectionLost(Throwable cause) {
-                        // Indicate disconnected state immediately
-                        setText(_apiStatusText, "🔴");
-
-                        // If MQTT is enabled, try to reconnect in background with backoff.
-                        if (_mqttRunning && !_mqttReconnectInProgress.getAndSet(true)) {
-                            new Thread(() -> {
-                                int delaySec = 2;
-                                while (_mqttRunning && (_mqttClient == null || !_mqttClient.isConnected())) {
-                                    try {
-                                        Thread.sleep(delaySec * 1000L);
-                                        // Attempt reconnect (connectToMqtt is safe to call repeatedly)
-                                        connectToMqtt();
-                                        if (_mqttClient != null && _mqttClient.isConnected()) break;
-                                        // Exponential backoff up to 60s
-                                        delaySec = Math.min(60, delaySec * 2);
-                                    } catch (InterruptedException ie) {
-                                        break; // stop on interruption
-                                    } catch (Exception e) {
-                                        // swallow and retry with backoff
-                                        delaySec = Math.min(60, delaySec * 2);
-                                    }
-                                }
-                                _mqttReconnectInProgress.set(false);
-                            }).start();
-                        }
-                    }
-
-                    @Override
-                    public void messageArrived(String topic, MqttMessage message) {
-                        handleMqttCommand(topic, new String(message.getPayload()));
-                    }
-
-                    @Override
-                    public void deliveryComplete(IMqttDeliveryToken token) {
-                    }
-                });
+            if (!_mqttRunning) {
+                setText(_apiStatusText, "⚪");
+                return;
             }
 
-            if (!_mqttClient.isConnected()) {
-                _mqttClient.connect(_mqttConnOpts);
-                subscribeCommandTopics();
-                publishHomeAssistantDiscovery();
-                startHeartbeatScheduler();
-                setText(_apiStatusText, "🔵"); 
+            synchronized (_mqttLock) {
+                if (_mqttClient == null) {
+                    String rawInput = _preferences.getString(PREFS_KEY_MQTT_URL, "").trim();
+                    String brokerUrl = rawInput;
+                    String username = null;
+                    String password = null;
+
+                    if (rawInput.contains("@") && rawInput.startsWith("tcp://")) {
+                        try {
+                            String withoutScheme = rawInput.substring(6);
+                            int atIndex = withoutScheme.lastIndexOf("@");
+                            if (atIndex != -1) {
+                                String userPass = withoutScheme.substring(0, atIndex);
+                                String hostPort = withoutScheme.substring(atIndex + 1);
+                                brokerUrl = "tcp://" + hostPort;
+                                int colonIndex = userPass.indexOf(":");
+                                if (colonIndex != -1) {
+                                    username = userPass.substring(0, colonIndex);
+                                    password = userPass.substring(colonIndex + 1);
+                                } else {
+                                    username = userPass;
+                                }
+                            }
+                        } catch (Exception e) {
+                            brokerUrl = rawInput;
+                        }
+                    }
+
+                    _mqttConnOpts = new MqttConnectOptions();
+                    _mqttConnOpts.setCleanSession(true);
+                    _mqttConnOpts.setConnectionTimeout(10); 
+                    _mqttConnOpts.setKeepAliveInterval(60); 
+                    _mqttConnOpts.setAutomaticReconnect(false);
+                    
+                    if (username != null && !username.isEmpty()) {
+                        _mqttConnOpts.setUserName(username);
+                        if (password != null) {
+                            _mqttConnOpts.setPassword(password.toCharArray());
+                        }
+                    }
+
+                    String clientId = "HondaE_Android_" + System.currentTimeMillis();
+                    _mqttClient = new MqttClient(brokerUrl, clientId, new MemoryPersistence());
+                    _mqttClient.setCallback(new MqttCallbackExtended() {
+                        @Override
+                        public void connectComplete(boolean reconnect, String serverURI) {
+                            // Clear reconnect-in-progress flag — we're connected now
+                            try {
+                                _mqttReconnectInProgress.set(false);
+                            } catch (Exception ignored) {}
+
+                            subscribeCommandTopics();
+                            // Reset discovery flag so it gets re-published on reconnect
+                            _discoveryPublished = false;
+                            // Re-publish discovery messages after connection/reconnection
+                            publishHomeAssistantDiscovery();
+                        }
+
+                        @Override
+                        public void connectionLost(Throwable cause) {
+                            // Indicate disconnected state immediately
+                            setText(_apiStatusText, "🔴");
+
+                            // If MQTT is enabled, try to reconnect in background with backoff.
+                            if (_mqttRunning && !_mqttReconnectInProgress.getAndSet(true)) {
+                                new Thread(() -> {
+                                    int delaySec = 2;
+                                    while (_mqttRunning && (_mqttClient == null || !_mqttClient.isConnected())) {
+                                        try {
+                                            Thread.sleep(delaySec * 1000L);
+                                            // Attempt reconnect (connectToMqtt is safe to call repeatedly)
+                                            connectToMqtt();
+                                            if (_mqttClient != null && _mqttClient.isConnected()) break;
+                                            // Exponential backoff up to 60s
+                                            delaySec = Math.min(60, delaySec * 2);
+                                        } catch (InterruptedException ie) {
+                                            break; // stop on interruption
+                                        } catch (Exception e) {
+                                            // swallow and retry with backoff
+                                            delaySec = Math.min(60, delaySec * 2);
+                                        }
+                                    }
+                                    _mqttReconnectInProgress.set(false);
+                                }).start();
+                            }
+                        }
+
+                        @Override
+                        public void messageArrived(String topic, MqttMessage message) {
+                            handleMqttCommand(topic, new String(message.getPayload()));
+                        }
+
+                        @Override
+                        public void deliveryComplete(IMqttDeliveryToken token) {
+                        }
+                    });
+                }
+
+                if (!_mqttClient.isConnected()) {
+                    _mqttClient.connect(_mqttConnOpts);
+                    subscribeCommandTopics();
+                    publishHomeAssistantDiscovery();
+                    startHeartbeatScheduler();
+                    setText(_apiStatusText, "🔵"); 
+                }
             }
 
         } catch (Exception e) {
@@ -1049,18 +1062,20 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                     _heartbeatTask.cancel(false);
                 }
 
-                if (_mqttClient != null) {
-                    try {
-                        if (_mqttClient.isConnected()) {
-                            _mqttClient.disconnect();
+                synchronized (_mqttLock) {
+                    if (_mqttClient != null) {
+                        try {
+                            if (_mqttClient.isConnected()) {
+                                _mqttClient.disconnect();
+                            }
+                        } catch (Exception ignored) {
                         }
-                    } catch (Exception ignored) {
+                        try {
+                            _mqttClient.close();
+                        } catch (Exception ignored) {
+                        }
+                        _mqttClient = null;
                     }
-                    try {
-                        _mqttClient.close();
-                    } catch (Exception ignored) {
-                    }
-                    _mqttClient = null;
                 }
                 _mqttReconnectInProgress.set(false);
                 setText(_apiStatusText, "⚪");
@@ -1177,12 +1192,14 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
     }
 
     private void publishMqttTopic(String subTopic, String payload) throws Exception {
-        if (_mqttClient == null || !_mqttClient.isConnected()) {
-            return;
+        synchronized (_mqttLock) {
+            if (_mqttClient == null || !_mqttClient.isConnected()) {
+                return;
+            }
+            MqttMessage message = new MqttMessage(payload.getBytes());
+            message.setQos(0);
+            _mqttClient.publish(MQTT_BASE_TOPIC + "/" + subTopic, message);
         }
-        MqttMessage message = new MqttMessage(payload.getBytes());
-        message.setQos(0);
-        _mqttClient.publish(MQTT_BASE_TOPIC + "/" + subTopic, message);
     }
     
     private void publishHomeAssistantDiscovery() {

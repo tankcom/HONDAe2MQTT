@@ -17,6 +17,7 @@ import org.jetbrains.annotations.Nullable;
 
 import io.reactivex.android.schedulers.AndroidSchedulers;
 import io.reactivex.disposables.CompositeDisposable;
+import io.reactivex.disposables.Disposable;
 import io.reactivex.schedulers.Schedulers;
 
 public class CommunicateViewModel extends AndroidViewModel {
@@ -41,6 +42,8 @@ public class CommunicateViewModel extends AndroidViewModel {
     private String _messageID = "";
     private boolean _retry = true;
     private boolean _autoReconnectEnabled = true;
+    @Nullable
+    private Disposable _activeConnectDisposable;
 
     public CommunicateViewModel(@NotNull Application application) {
         super(application);
@@ -81,13 +84,14 @@ public class CommunicateViewModel extends AndroidViewModel {
         _connectionAttemptedOrMade = true;
 
         // Connect asynchronously
-        _compositeDisposable.add(_bluetoothManager.openSerialDevice(_mac)
+        _activeConnectDisposable = _bluetoothManager.openSerialDevice(_mac)
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
                 .subscribe(
                         device -> onConnected(device.toSimpleDeviceInterface()),
                         this::handleTransportError
-                ));
+            );
+        _compositeDisposable.add(_activeConnectDisposable);
     }
 
     public void disconnect() {
@@ -108,7 +112,19 @@ public class CommunicateViewModel extends AndroidViewModel {
     }
 
     private void onConnected(SimpleBluetoothDeviceInterface deviceInterface) {
+        // Ignore late callbacks from stale connect attempts after disconnect/reset.
+        if (_manualDisconnectRequested || !_connectionAttemptedOrMade) {
+            try {
+                if (_bluetoothManager != null && deviceInterface != null) {
+                    _bluetoothManager.closeDevice(deviceInterface);
+                }
+            } catch (Exception ignored) {
+            }
+            return;
+        }
+
         _manualDisconnectRequested = false;
+        _activeConnectDisposable = null;
         this._deviceInterface = deviceInterface;
         if (this._deviceInterface != null) {
             _connectionStatusData.postValue(ConnectionStatus.CONNECTED);
@@ -183,6 +199,8 @@ public class CommunicateViewModel extends AndroidViewModel {
     }
 
     private void closeActiveDeviceQuietly() {
+        cancelActiveConnectAttempt();
+
         if (_bluetoothManager != null && _deviceInterface != null) {
             try {
                 _bluetoothManager.closeDevice(_deviceInterface);
@@ -191,6 +209,13 @@ public class CommunicateViewModel extends AndroidViewModel {
         }
         _deviceInterface = null;
         _connectionAttemptedOrMade = false;
+    }
+
+    private void cancelActiveConnectAttempt() {
+        if (_activeConnectDisposable != null && !_activeConnectDisposable.isDisposed()) {
+            _activeConnectDisposable.dispose();
+        }
+        _activeConnectDisposable = null;
     }
 
     @Override
