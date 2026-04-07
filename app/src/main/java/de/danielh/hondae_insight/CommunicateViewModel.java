@@ -96,6 +96,17 @@ public class CommunicateViewModel extends AndroidViewModel {
         _connectionStatusData.postValue(ConnectionStatus.DISCONNECTED);
     }
 
+    public void resetConnectionForReconnect() {
+        _manualDisconnectRequested = false;
+        closeActiveDeviceQuietly();
+
+        if (_autoReconnectEnabled && _retry) {
+            _connectionStatusData.postValue(ConnectionStatus.RETRY);
+        } else {
+            _connectionStatusData.postValue(ConnectionStatus.DISCONNECTED);
+        }
+    }
+
     private void onConnected(SimpleBluetoothDeviceInterface deviceInterface) {
         _manualDisconnectRequested = false;
         this._deviceInterface = deviceInterface;

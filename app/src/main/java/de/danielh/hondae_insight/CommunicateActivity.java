@@ -66,6 +66,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     public static final int PARK_STAGE_1_SECONDS = 3 * 60;
     public static final int PARK_STAGE_2_SECONDS = 30 * 60;
     public static final int BT_DISCONNECT_DEBOUNCE_SECONDS = 12;
+    public static final int CAN_SILENCE_FORCE_RECONNECT_SECONDS = 120;
 
     // CAN Command IDs
     public static final String VIN_ID = "1862F190";
@@ -737,6 +738,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
 
     private void connectCAN() { 
         setText(_apiStatusText, "⚪");
+        long canSilenceSinceEpoch = System.currentTimeMillis() / 1000;
 
         while (_loopRunning && !_carConnected) {
             try {
@@ -754,15 +756,18 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                                 setText(_vinText, _vin);
                                 _carConnected = true;
                                 _lastCanMessageEpoch = System.currentTimeMillis() / 1000;
+                                canSilenceSinceEpoch = _lastCanMessageEpoch;
                                 _viewModel.setNewMessageProcessed();
                                 break;
                             } else if (_viewModel.isNewMessage()) {
                                 setText(_messageText, message);
+                                canSilenceSinceEpoch = System.currentTimeMillis() / 1000;
                                 _viewModel.setNewMessageProcessed();
                             }
                             if (message.matches("\\d+\\.\\dV")) {
                                 _auxBat = Double.parseDouble(message.substring(0, message.length() - 1));
                                 setText(_auxBatText, message);
+                                canSilenceSinceEpoch = System.currentTimeMillis() / 1000;
                             }
                         }
                     }
@@ -773,6 +778,22 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
 
                 if (!_carConnected) {
                     setText(_messageText, "CAN not responding, BT bleibt verbunden...");
+
+                    long nowEpoch = System.currentTimeMillis() / 1000;
+                    if (nowEpoch - canSilenceSinceEpoch >= CAN_SILENCE_FORCE_RECONNECT_SECONDS) {
+                        setText(_messageText, "No CAN data for " + CAN_SILENCE_FORCE_RECONNECT_SECONDS + "s, forcing BT reconnect...");
+                        _mainHandler.post(() -> {
+                            if (_viewModel != null && _connectSwitch != null && _connectSwitch.isChecked()) {
+                                _mainHandler.removeCallbacks(_publishBtDisconnectedRunnable);
+                                _bluetoothConnected = false;
+                                publishControlStatusAsync();
+                                _viewModel.setRetry(_viewModel.isAutoReconnectEnabled());
+                                _viewModel.resetConnectionForReconnect();
+                            }
+                        });
+                        return;
+                    }
+
                     Thread.sleep(2000);
                 }
             } catch (InterruptedException e) {
@@ -1016,9 +1037,36 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         if (isChecked) {
             restartMqtt();
         } else {
-            connectToMqtt();
+            stopMqttConnection();
         }
         publishControlStatusAsync();
+    }
+
+    private void stopMqttConnection() {
+        new Thread(() -> {
+            try {
+                if (_heartbeatTask != null && !_heartbeatTask.isCancelled()) {
+                    _heartbeatTask.cancel(false);
+                }
+
+                if (_mqttClient != null) {
+                    try {
+                        if (_mqttClient.isConnected()) {
+                            _mqttClient.disconnect();
+                        }
+                    } catch (Exception ignored) {
+                    }
+                    try {
+                        _mqttClient.close();
+                    } catch (Exception ignored) {
+                    }
+                    _mqttClient = null;
+                }
+                _mqttReconnectInProgress.set(false);
+                setText(_apiStatusText, "⚪");
+            } catch (Exception ignored) {
+            }
+        }).start();
     }
 
     private void handleAutoReconnectSwitch(boolean isChecked) {
@@ -1049,9 +1097,9 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         runOnUiThread(() -> {
             if (MQTT_TOPIC_COMMAND_CONNECT.equals(topic)) {
                 if (isOnPayload(payload)) {
-                    _connectSwitch.setChecked(true);
+                    applyConnectCommand(true);
                 } else if (isOffPayload(payload)) {
-                    _connectSwitch.setChecked(false);
+                    applyConnectCommand(false);
                 }
             } else if (MQTT_TOPIC_COMMAND_AUTO_RECONNECT.equals(topic)) {
                 if (isOnPayload(payload)) {
@@ -1079,6 +1127,33 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
                 publishControlStatusAsync();
             }
         });
+    }
+
+    private void applyConnectCommand(boolean connectRequested) {
+        if (_connectSwitch == null || _viewModel == null) {
+            return;
+        }
+
+        if (connectRequested) {
+            if (_connectSwitch.isChecked()) {
+                // Already active: force a transport reset so MQTT can recover stale BT sessions.
+                _viewModel.setRetry(_viewModel.isAutoReconnectEnabled());
+                _viewModel.resetConnectionForReconnect();
+            } else {
+                _connectSwitch.setChecked(true);
+            }
+        } else {
+            if (_connectSwitch.isChecked()) {
+                _connectSwitch.setChecked(false);
+            } else {
+                _viewModel.setRetry(false);
+                _viewModel.disconnect();
+            }
+
+            _mainHandler.removeCallbacks(_publishBtDisconnectedRunnable);
+            _bluetoothConnected = false;
+            publishControlStatusAsync();
+        }
     }
 
     private Integer parsePollingSeconds(String payload) {
