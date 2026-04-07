@@ -192,7 +192,9 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private final Runnable _btRssiScanRunnable = new Runnable() {
         @Override
         public void run() {
-            scanBluetoothRssi();
+            if (!_bluetoothConnected && _connectSwitch != null && !_connectSwitch.isChecked() && !_isReconnectFlow) {
+                scanBluetoothRssi();
+            }
             _mainHandler.postDelayed(this, BT_RSSI_SCAN_INTERVAL_SECONDS * 1000L);
         }
     };
@@ -226,6 +228,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     private final Handler _mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable _reconnectRunnable = () -> {
         if (_viewModel != null && _viewModel.isAutoReconnectEnabled() && _connectSwitch != null && _connectSwitch.isChecked()) {
+            stopBluetoothDiscovery();
             _viewModel.connect();
         }
     };
@@ -429,6 +432,7 @@ public class CommunicateActivity extends AppCompatActivity implements LocationLi
     // --- FIX: Simplified Connection Switch Logic ---
     private void handleConnectionSwitch(CompoundButton buttonView, boolean isChecked) {
         if (isChecked) {
+            stopBluetoothDiscovery();
             _mainHandler.removeCallbacks(_reconnectRunnable);
             _viewModel.setRetry(true);
             _viewModel.connect();
@@ -446,6 +450,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         switch (connectionStatus) {
             case CONNECTED:
                 _isReconnectFlow = false;
+                stopBluetoothDiscovery();
                 _connectionText.setText(R.string.status_connected);
                 _connectSwitch.setChecked(true);
                 _connectSwitch.setEnabled(true);
@@ -464,6 +469,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
 
             case CONNECTING:
                 _bluetoothConnected = false;
+                stopBluetoothDiscovery();
                 _connectionText.setText(_isReconnectFlow ? R.string.status_reconnecting : R.string.status_connecting);
                 _connectSwitch.setChecked(true);
                 _connectSwitch.setEnabled(true); 
@@ -492,6 +498,7 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
             case RETRY:
                 _isReconnectFlow = true;
                 _bluetoothConnected = false;
+                stopBluetoothDiscovery();
                 publishControlStatusAsync();
                 if (_viewModel.isAutoReconnectEnabled()) {
                     _connectionText.setText(R.string.status_reconnecting);
@@ -1666,6 +1673,9 @@ private void onConnectionStatus(CommunicateViewModel.ConnectionStatus connection
         }
         String value = _btRssiDbm == Integer.MIN_VALUE ? getString(R.string.bt_rssi_unknown) : (_btRssiDbm + " dBm");
         setText(_btRssiText, value);
+        if (_messageText != null) {
+            setText(_messageText, "BT RSSI: " + value);
+        }
     }
 
     private String getBtRssiPayload() {
