@@ -102,3 +102,7 @@ When a vehicle session begins the app creates a CSV file on external storage. Th
 ## Disclaimer
 
 This app is provided for testing and experimentation. Use at your own risk. Contributions and pull requests are welcome.
+
+## Thanks
+
+This Work is largely based on the Work of [ToniH1987s HONDAeInsight](https://github.com/ToniH1987/HONDAeInsight) and [kobius77s HONDAe2MQTT](https://github.com/kobius77/HONDAe2MQTT)
